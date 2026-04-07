@@ -681,7 +681,7 @@ pub fn default_session_path() -> PathBuf {
 mod tests {
     use super::*;
     use crate::config::helpers::lock_env;
-    use crate::settings::Settings;
+    use crate::settings::{LlmBuiltinOverride, Settings};
     use crate::testing::credentials::*;
 
     /// Convenience wrapper for tests — uses "TEST_HEADERS" as the env var name.
