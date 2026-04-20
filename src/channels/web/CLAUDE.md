@@ -70,7 +70,7 @@ subset that can later be replaced by a typed `Deps` alias.
 ### Chat
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/api/chat/send` | Send message → queues to agent loop |
+| POST | `/api/chat/send` | Send message + optional inline attachments → queues to agent loop |
 | GET | `/api/chat/events` | SSE stream of agent events |
 | GET | `/api/chat/ws` | WebSocket alternative to SSE |
 | GET | `/api/chat/history` | Paginated turn history for a thread |
@@ -351,7 +351,7 @@ All responses include:
 - `X-Content-Type-Options: nosniff`
 - `X-Frame-Options: DENY`
 
-**Request body limit:** 10 MB (`DefaultBodyLimit::max(10 * 1024 * 1024)`), sized for image uploads (#725). Larger payloads return 413.
+**Request body limit:** 14 MiB (`DefaultBodyLimit::max(14 * 1024 * 1024)`), sized to cover base64-encoded inline attachment uploads plus JSON overhead. The decoded attachment budget remains 5 MiB per file and 10 MiB total; larger payloads return 413 or 400 depending on which limit trips first.
 
 ## Pending Gates
 

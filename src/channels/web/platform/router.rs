@@ -500,7 +500,7 @@ pub async fn start_server(
         .merge(statics)
         .merge(projects)
         .merge(protected)
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB max request body (image uploads)
+        .layer(DefaultBodyLimit::max(14 * 1024 * 1024)) // 14 MiB request body to cover 10 MiB decoded attachments plus base64/JSON overhead
         .layer(tower_http::catch_panic::CatchPanicLayer::custom(
             |panic_info: Box<dyn std::any::Any + Send + 'static>| {
                 let detail = if let Some(s) = panic_info.downcast_ref::<String>() {
