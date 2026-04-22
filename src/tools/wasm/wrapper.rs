@@ -12,6 +12,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::protocol::Message;
 use wasmtime::Store;
 use wasmtime::component::Linker;
 use wasmtime_wasi::{ResourceTable, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -260,6 +262,235 @@ impl StoreData {
             }
         }
     }
+
+    /// One-shot WebSocket roundtrip: connect, send, recv until timeout, close.
+    ///
+    /// Uses the same allowlist as HTTP by normalizing `wss://` → `https://`
+    /// for the access check. The full lifecycle is contained within this call
+    /// — no state survives between invocations.
+    pub fn ws_roundtrip(
+        &mut self,
+        url: String,
+        body: Option<Vec<u8>>,
+        timeout_ms: Option<u32>,
+    ) -> Result<near::agent::host::HttpResponse, String> {
+        // Validate scheme before URL is consumed by into_client_request below.
+        if !url.starts_with("wss://") && !url.starts_with("ws://") {
+            return Err("WS method requires ws:// or wss:// URL scheme".to_string());
+        }
+
+        // Check allowlist with original URL. WS upgrades originate from GET requests.
+        self.host_state
+            .check_http_allowed(&url, "GET")
+            .map_err(|e| format!("WS not allowed: {}", e))?;
+        self.host_state
+            .record_http_request()
+            .map_err(|e| format!("Rate limit exceeded: {}", e))?;
+
+        // Leak scan on outbound body
+        let leak_detector = LeakDetector::new();
+        if let Some(body_bytes) = body.as_deref() {
+            let body_str = String::from_utf8_lossy(body_bytes);
+            leak_detector
+                .scan_and_clean(&body_str)
+                .map_err(|e| format!("Potential secret leak in WS body blocked: {}", e))?;
+        }
+
+        // Reuse the lazily-created HTTP runtime (tokio current-thread)
+        if self.http_runtime.is_none() {
+            self.http_runtime = Some(
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|_| "Failed to create runtime".to_string())?,
+            );
+        }
+        let rt = self.http_runtime.as_ref().expect("just initialized");
+
+        // SSRF: validate + resolve DNS, reject private IPs, pin resolved addresses.
+        let target = rt.block_on(validate_and_resolve_http_target(&url))?;
+
+        let timeout_ms = timeout_ms.unwrap_or(10_000).min(300_000) as u64;
+
+        let result: Result<near::agent::host::HttpResponse, String> = rt.block_on(async {
+            use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+            let request = url
+                .into_client_request()
+                .map_err(|_| "Invalid WS URL".to_string())?;
+
+            let ws_stream = Self::ws_connect(request, target.resolved_addrs()).await?;
+            let (mut tx, mut rx) = ws_stream.split();
+
+            // Send body if provided. On send error, attempt clean close before returning.
+            if let Some(body_bytes) = body {
+                let msg = String::from_utf8(body_bytes)
+                    .map_err(|_| "WS body is not valid UTF-8".to_string())?;
+                if tx.send(Message::Text(msg.into())).await.is_err() {
+                    let _ = tx.close().await;
+                    return Err("WS send failed".to_string());
+                }
+            }
+
+            let collected = Self::ws_exchange(&mut rx, &mut tx, timeout_ms).await;
+
+            // Leak scan on collected messages
+            let body_text = collected.join("\n");
+            leak_detector
+                .scan_and_clean(&body_text)
+                .map_err(|e| format!("Potential secret leak in WS response: {}", e))?;
+
+            Ok(near::agent::host::HttpResponse {
+                status: 101, // Switching Protocols — signals WS success
+                headers_json: "{}".to_string(),
+                body: body_text.into_bytes(),
+            })
+        });
+
+        result.map_err(|e| self.redact_credentials(&e))
+    }
+
+    /// Connect to a WebSocket server by trying resolved addresses in order.
+    ///
+    /// For each address: TCP connect → rebinding check → TLS+WS upgrade.
+    /// Returns the first successfully established stream. Error messages are
+    /// sanitized — no IP addresses or internal details leak to the WASM guest.
+    async fn ws_connect(
+        request: tokio_tungstenite::tungstenite::handshake::client::Request,
+        addrs: &[std::net::SocketAddr],
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        String,
+    > {
+        if addrs.is_empty() {
+            return Err("No resolved addresses for WS target".to_string());
+        }
+
+        let mut last_err = String::new();
+        let mut last_err_kind = String::new();
+
+        for addr in addrs {
+            let tcp_stream = match tokio::net::TcpStream::connect(addr).await {
+                Ok(s) => s,
+                Err(e) => {
+                    last_err_kind = format!("tcp_connect({})", e.kind());
+                    last_err = "WS TCP connect failed".to_string();
+                    continue;
+                }
+            };
+
+            // Re-verify connected address is in the resolved set.
+            // Catches DNS rebinding between resolution and TCP connect
+            // (e.g. happy eyeballs racing on a dual-stack host).
+            let connected_addr = tcp_stream
+                .peer_addr()
+                .map_err(|_| "WS: failed to read connected address".to_string())?;
+            if !addrs.iter().any(|a| a.ip() == connected_addr.ip()) {
+                last_err = "WS: connected address differs from resolved".to_string();
+                continue;
+            }
+
+            // Disable Nagle's algorithm for low-latency frame delivery.
+            let _ = tcp_stream.set_nodelay(true);
+
+            // client_async_tls_with_config handles both TLS (wss://) and
+            // plain (ws://) internally based on the URL scheme in the request.
+            // Passing None as the connector uses the default rustls config
+            // with native root certs.
+            let result = tokio_tungstenite::client_async_tls_with_config(
+                request.clone(),
+                tcp_stream,
+                None,
+                None,
+            )
+            .await;
+
+            match result {
+                Ok((stream, _)) => return Ok(stream),
+                Err(e) => {
+                    last_err_kind = format!(
+                        "ws_handshake({})",
+                        e.to_string().chars().take(40).collect::<String>()
+                    );
+                    last_err = "WS handshake failed".to_string();
+                    continue;
+                }
+            }
+        }
+
+        if last_err_kind.is_empty() {
+            Err(format!("All {} WS addresses failed: {}", addrs.len(), last_err))
+        } else {
+            Err(format!(
+                "All {} WS addresses failed: {} [{}]",
+                addrs.len(), last_err, last_err_kind
+            ))
+        }
+    }
+
+    /// Send messages and collect response frames until timeout or size cap.
+    ///
+    /// Returns all collected text frames (may be empty if the server closes
+    /// immediately). The caller is responsible for closing `tx`.
+    ///
+    /// tungstenite reassembles fragmented frames internally — we receive
+    /// complete Text/Binary messages, not raw continuation frames.
+    /// On read errors we stop and return whatever was collected so far
+    /// rather than injecting fake JSON into the response body.
+    async fn ws_exchange(
+        rx: &mut futures::stream::SplitStream<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+        tx: &mut futures::stream::SplitSink<
+            tokio_tungstenite::WebSocketStream<
+                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+            >,
+            Message,
+        >,
+        timeout_ms: u64,
+    ) -> Vec<String> {
+        /// Maximum bytes we'll collect from the relay before cutting off.
+        const MAX_WS_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MiB
+
+        let mut collected: Vec<String> = Vec::new();
+        let mut total_bytes: usize = 0;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+
+            match tokio::time::timeout(remaining, rx.next()).await {
+                Ok(Some(Ok(Message::Text(text)))) => {
+                    total_bytes += text.len();
+                    if total_bytes > MAX_WS_RESPONSE_BYTES {
+                        break; // size cap reached — close cleanly below
+                    }
+                    collected.push(text.to_string());
+                }
+                Ok(Some(Ok(Message::Close(_)))) => break,
+                Ok(Some(Ok(Message::Ping(_)))) => {
+                    // tungstenite auto-responds with pong — no action needed
+                    continue;
+                }
+                Ok(Some(Ok(_))) => continue, // binary/pong/frame — ignore
+                Ok(Some(Err(_))) => break,   // read error — stop, return what we have
+                Ok(None) => break,           // stream ended
+                Err(_) => break,             // timeout
+            }
+        }
+
+        // Graceful close — send CLOSE frame so the relay sees a clean disconnect
+        let _ = tx.close().await;
+
+        collected
+    }
 }
 
 // Provide WASI context for the WASM component.
@@ -307,6 +538,15 @@ impl near::agent::host::Host for StoreData {
     ) -> Result<near::agent::host::HttpResponse, String> {
         // Inject credentials into URL (e.g., replace {TELEGRAM_BOT_TOKEN})
         let injected_url = self.inject_credentials(&url, "url");
+
+        // ==================== WebSocket shortcut ====================
+        // When method is "WS", perform a one-shot WebSocket roundtrip instead
+        // of HTTP.  This lets WASM tools talk to WS-only services (e.g. Nostr
+        // relays) without any WIT changes.  The lifecycle is fully contained
+        // within this single call: connect → send → recv until timeout → close.
+        if method == "WS" {
+            return self.ws_roundtrip(injected_url, body, timeout_ms);
+        }
 
         // Check HTTP allowlist
         self.host_state
@@ -1837,6 +2077,7 @@ mod tests {
     use crate::tools::tool::Tool;
     use crate::tools::wasm::capabilities::Capabilities;
     use crate::tools::wasm::runtime::{WasmRuntimeConfig, WasmToolRuntime};
+    use super::StoreData;
 
     struct RecordingSecretsStore {
         inner: InMemorySecretsStore,
@@ -3519,6 +3760,7 @@ mod tests {
                 max_request_bytes: 1024 * 1024,
                 max_response_bytes: 10 * 1024 * 1024,
                 timeout: std::time::Duration::from_secs(30),
+                allow_insecure: false,
             }),
             ..Default::default()
         };
@@ -3635,6 +3877,7 @@ mod tests {
                 max_request_bytes: 1024 * 1024,
                 max_response_bytes: 10 * 1024 * 1024,
                 timeout: std::time::Duration::from_secs(30),
+                allow_insecure: false,
             }),
             ..Default::default()
         }
@@ -3900,6 +4143,123 @@ mod tests {
         assert!(
             !debug_output.contains("raw-secret-bytes"),
             "secret_value leaked: {debug_output}"
+        );
+    }
+
+    // ── WebSocket roundtrip tests ──────────────────────────────────────
+
+    /// Helper: spawn a plain WS echo server on a random port.
+    /// Returns (addr, shutdown_tx).
+    async fn start_ws_echo_server() -> (SocketAddr, oneshot::Sender<()>) {
+        use futures::SinkExt as _;
+        use futures::StreamExt as _;
+        use tokio_tungstenite::accept_async;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
+
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    accept_result = listener.accept() => {
+                        if let Ok((stream, _)) = accept_result {
+                            let ws = accept_async(stream).await;
+                            if let Ok(mut ws) = ws {
+                                while let Some(Ok(msg)) = ws.next().await {
+                                    if let tokio_tungstenite::tungstenite::Message::Text(text) = msg {
+                                        let reply = format!("echo:{text}");
+                                        let typed_reply = tokio_tungstenite::tungstenite::Message::Text(reply.into());
+                                        if ws.send(typed_reply).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ = &mut shutdown_rx => break,
+                }
+            }
+        });
+
+        (addr, shutdown_tx)
+    }
+
+    #[test]
+    fn test_ws_roundtrip_echo() {
+        use crate::tools::wasm::{HttpCapability, EndpointPattern};
+
+        // Allow private IPs for this test (echo server binds to 127.0.0.1).
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe { std::env::remove_var("IRONCLAW_TEST_ALLOW_PRIVATE_IP") };
+            }
+        }
+        unsafe { std::env::set_var("IRONCLAW_TEST_ALLOW_PRIVATE_IP", "1") };
+        let _guard = EnvGuard;
+
+        // Spin up a local WS echo server
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (addr, shutdown) = rt.block_on(start_ws_echo_server());
+
+        // Create StoreData with localhost in the allowlist (allow_insecure for ws://)
+        let mut http_cap = HttpCapability::new(vec![
+            EndpointPattern {
+                host: "127.0.0.1".to_string(),
+                path_prefix: None,
+                methods: vec!["POST".to_string()],
+            },
+        ]);
+        http_cap.allow_insecure = true;
+        let caps = Capabilities::default().with_http(http_cap);
+        let mut store = StoreData::new(1024 * 1024, caps, HashMap::new(), vec![]);
+
+        let url = format!("ws://127.0.0.1:{}/", addr.port());
+        let result = store.ws_roundtrip(
+            url,
+            Some(b"hello world".to_vec()),
+            Some(3000),
+        );
+
+        // Clean up server
+        let _ = shutdown.send(());
+
+        let resp = result.expect("ws_roundtrip should succeed");
+        assert_eq!(resp.status, 101, "status should be 101 (Switching Protocols)");
+        let body = String::from_utf8(resp.body).expect("body should be valid UTF-8");
+        assert!(
+            body.contains("echo:hello world"),
+            "echo server should have replied with 'echo:hello world', got: {body}"
+        );
+    }
+
+    #[test]
+    fn test_ws_roundtrip_rejects_non_ws_scheme() {
+        let mut store = StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), vec![]);
+        let result = store.ws_roundtrip(
+            "https://example.com/".to_string(),
+            None,
+            None,
+        );
+        assert!(
+            result.unwrap_err().contains("requires ws:// or wss://"),
+            "should reject non-WS URL scheme"
+        );
+    }
+
+    #[test]
+    fn test_ws_roundtrip_rejects_not_in_allowlist() {
+        let mut store = StoreData::new(1024 * 1024, Capabilities::default(), HashMap::new(), vec![]);
+        let result = store.ws_roundtrip(
+            "wss://relay.damus.io/".to_string(),
+            None,
+            None,
+        );
+        assert!(
+            result.unwrap_err().contains("WS not allowed"),
+            "should reject URL not in allowlist"
         );
     }
 }
