@@ -4257,7 +4257,7 @@ mod tests {
             EndpointPattern {
                 host: "127.0.0.1".to_string(),
                 path_prefix: None,
-                methods: vec!["POST".to_string()],
+                methods: vec!["GET".to_string()],
             },
         ]);
         http_cap.allow_insecure = true;
@@ -4312,5 +4312,78 @@ mod tests {
             result.unwrap_err().contains("WS not allowed"),
             "should reject URL not in allowlist"
         );
+    }
+
+    #[test]
+    fn test_ws_roundtrip_real_nostr_relay() {
+        use crate::tools::wasm::{EndpointPattern, HttpCapability};
+
+        let mut http_cap = HttpCapability::new(vec![
+            EndpointPattern {
+                host: "relay.damus.io".to_string(),
+                path_prefix: None,
+                methods: vec!["GET".to_string()],
+            },
+            EndpointPattern {
+                host: "nos.lol".to_string(),
+                path_prefix: None,
+                methods: vec!["GET".to_string()],
+            },
+            EndpointPattern {
+                host: "relay.nostr.band".to_string(),
+                path_prefix: None,
+                methods: vec!["GET".to_string()],
+            },
+            EndpointPattern {
+                host: "nostr-pub.wellorder.net".to_string(),
+                path_prefix: None,
+                methods: vec!["GET".to_string()],
+            },
+        ]);
+        let caps = Capabilities::default().with_http(http_cap);
+        let mut store = StoreData::new(1024 * 1024, caps, HashMap::new(), vec![]);
+
+        // Query for a well-known Nostr profile (kind 0, limit 1)
+        let filter = r#"{"kinds":[0],"limit":1}"#;
+        let payload = format!(r#"["REQ","e2e-test",{}]"#, filter);
+
+        let relays = [
+            "wss://relay.damus.io",
+            "wss://nos.lol",
+            "wss://relay.nostr.band",
+            "wss://nostr-pub.wellorder.net",
+        ];
+
+        let mut any_success = false;
+        for relay in &relays {
+            let result = store.ws_roundtrip(
+                relay.to_string(),
+                Some(payload.as_bytes().to_vec()),
+                Some(5000),
+            );
+
+            match result {
+                Ok(resp) => {
+                    assert_eq!(resp.status, 101, "WS should return 101 for {}", relay);
+                    let body = String::from_utf8(resp.body).unwrap_or_default();
+                    // Parse as JSON array of frames
+                    let frames: Vec<String> = serde_json::from_str(&body)
+                        .unwrap_or_else(|_| vec![body]);
+                    // Check for EVENT or EOSE in the response
+                    let has_event = frames.iter().any(|f| f.contains("\"EVENT\""));
+                    let has_eose = frames.iter().any(|f| f.contains("\"EOSE\""));
+                    if has_event || has_eose {
+                        any_success = true;
+                        break;
+                    }
+                }
+                Err(_) => continue, // try next relay
+            }
+        }
+
+        // Don't fail CI if relays are unreachable — network-dependent test
+        if !any_success {
+            eprintln!("SKIP: no relay reachable (network-dependent test)");
+        }
     }
 }
