@@ -183,20 +183,26 @@ Both backends support embeddings, but with different implementations:
 
 ### From libSQL to PostgreSQL
 
-1. **Export from libSQL:**
+<Warning>
+SQLite and PostgreSQL have different SQL dialects. A raw `sqlite3 .dump` output may fail on PostgreSQL due to PRAGMA statements, type differences, and quoting. Use a conversion tool like [pgloader](https://pgloader.io/) or [pgloader Docker](https://hub.docker.com/r/dimitri/pgloader) for reliable migration.
+</Warning>
+
+1. **Using pgloader (recommended):**
    ```bash
-   sqlite3 ~/.ironclaw/ironclaw.db ".dump" > ironclaw.sql
+   pgloader ~/.ironclaw/ironclaw.db postgresql://ironclaw:***@localhost/ironclaw
    ```
 
-2. **Import to PostgreSQL:**
+2. **Manual export (may require editing):**
    ```bash
+   sqlite3 ~/.ironclaw/ironclaw.db ".dump" > ironclaw.sql
+   # Edit ironclaw.sql to remove PRAGMAs and fix type incompatibilities
    psql -d ironclaw -f ironclaw.sql
    ```
 
 3. **Update IronClaw config:**
    ```bash
    export DATABASE_BACKEND=postgres
-   export DATABASE_URL="postgres://user:pass@localhost/ironclaw"
+   export DATABASE_URL="postgres://user:***@localhost/ironclaw"
    ```
 
 4. **Restart IronClaw**
