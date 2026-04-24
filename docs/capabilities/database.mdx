@@ -3,12 +3,16 @@ title: Database Backends
 description: PostgreSQL vs libSQL — choosing your database
 ---
 
-IronClaw supports two database backends: **PostgreSQL** and **libSQL** (embedded SQLite). Choose based on your deployment needs.
+IronClaw supports two database backends: **PostgreSQL** and **libSQL** (embedded SQLite). **PostgreSQL is the default** — if you don't set `DATABASE_BACKEND`, IronClaw will use PostgreSQL and require a `DATABASE_URL`. Choose libSQL for zero-config personal use.
+
+<Warning>
+If you start IronClaw without configuring a database, you'll see: `DATABASE_URL is required`. Run `ironclaw onboard` or set the environment variables manually.
+</Warning>
 
 ## Quick Comparison
 
-| Feature | PostgreSQL | libSQL |
-|---------|------------|--------|
+| Feature | PostgreSQL (default) | libSQL |
+|---------|----------------------|--------|
 | **Setup** | Requires PostgreSQL server | Zero-dependency, auto-created |
 | **Best For** | Production, multi-user | Personal use, single-user |
 | **Search** | Hybrid (FTS + vector) | FTS only (vector via Turso) |
@@ -27,18 +31,37 @@ Recommended for production deployments, multi-user scenarios, and high-throughpu
 
 ### Installation
 
-```bash
-# Ubuntu/Debian
-sudo apt install postgresql-15 postgresql-15-pgvector
+<AccordionGroup>
+  <Accordion title="Docker Compose (recommended)" icon="container">
+    The fastest way to get started. A `docker-compose.yml` is included in the IronClaw repository:
 
-# macOS (Homebrew)
-brew install postgresql
-brew install pgvector
+    ```bash
+    cd ironclaw
+    docker compose up -d postgres
+    ```
 
-# Start PostgreSQL
-sudo systemctl enable --now postgresql  # Linux
-brew services start postgresql          # macOS
-```
+    This starts `pgvector/pgvector:pg16` on `127.0.0.1:5432` with database, user, and password all set to `ironclaw`.
+
+    <Warning>
+    These credentials are for local development only. Change `POSTGRES_PASSWORD` for any non-local deployment.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="Ubuntu/Debian" icon="terminal">
+    ```bash
+    sudo apt install postgresql-15 postgresql-15-pgvector
+    sudo systemctl enable --now postgresql
+    ```
+  </Accordion>
+
+  <Accordion title="macOS (Homebrew)" icon="terminal">
+    ```bash
+    brew install postgresql
+    brew install pgvector
+    brew services start postgresql
+    ```
+  </Accordion>
+</AccordionGroup>
 
 ### Configuration
 
@@ -55,10 +78,18 @@ sudo -u postgres psql -d ironclaw -c "CREATE EXTENSION IF NOT EXISTS vector;"
 ### IronClaw Configuration
 
 ```bash
+# Select backend (optional — postgres is the default)
+# Accepted values: postgres, postgresql, pg | libsql, turso, sqlite
 export DATABASE_BACKEND=postgres
+
+# Required for PostgreSQL
 export DATABASE_URL="postgres://ironclaw:***@localhost/ironclaw"
 export DATABASE_POOL_SIZE=30  # default; increase for high-throughput workloads
 ```
+
+<Warning>
+`DATABASE_URL` is **required** when using PostgreSQL. If not set, IronClaw will fail to start with the error: `DATABASE_URL is required — Run 'ironclaw onboard' or set DATABASE_URL environment variable`.
+</Warning>
 
 Or in the wizard:
 1. Select "PostgreSQL"
@@ -109,8 +140,12 @@ libSQL supports syncing to Turso for cloud backup:
 export DATABASE_BACKEND=libsql
 export LIBSQL_PATH="/home/user/.ironclaw/ironclaw.db"
 export LIBSQL_URL="libsql://your-db.turso.io"
-export LIBSQL_AUTH_TOKEN="your-auth-token"
+export LIBSQL_AUTH_TOKEN="***"
 ```
+
+<Warning>
+`LIBSQL_AUTH_TOKEN` is **required** when `LIBSQL_URL` is set. IronClaw will fail to start without it.
+</Warning>
 
 This keeps a local copy with automatic cloud sync.
 
