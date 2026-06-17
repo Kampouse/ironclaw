@@ -50,6 +50,8 @@ mod failure_summary;
 mod google_oauth;
 mod gsuite;
 mod hooks;
+#[cfg(feature = "slack-v2-host-beta")]
+pub mod host_ingress;
 mod input;
 mod lifecycle;
 #[cfg(feature = "root-llm-provider")]
