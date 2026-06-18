@@ -128,6 +128,8 @@ mod slack_egress;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_beta;
 #[cfg(feature = "slack-v2-host-beta")]
+pub mod slack_host_ingress;
+#[cfg(feature = "slack-v2-host-beta")]
 mod slack_host_state;
 #[cfg(feature = "slack-v2-host-beta")]
 mod slack_outbound_targets;
