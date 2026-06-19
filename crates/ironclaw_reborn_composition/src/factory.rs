@@ -558,6 +558,7 @@ pub(crate) struct RebornLocalRuntimeServices {
     // wiring need scoped storage/registry ownership before this is reused
     // outside local-dev composition. Tracked in #4091.
     pub(crate) extension_management: Option<Arc<RebornLocalExtensionManagementPort>>,
+    pub(crate) secret_store: Option<Arc<dyn SecretStore>>,
     pub(crate) runtime_http_egress: Option<Arc<dyn RuntimeHttpEgress>>,
     pub(crate) host_runtime_http_egress: Option<HostRuntimeHttpEgressPort>,
     pub(crate) skill_mounts: MountView,
@@ -1021,6 +1022,13 @@ async fn build_local_runtime(input: RebornBuildInput) -> Result<RebornServices, 
     let secret_store: Arc<dyn SecretStore> = local_dev_secret_store.clone();
     #[cfg(not(any(feature = "libsql", feature = "postgres")))]
     let secret_store: Arc<dyn SecretStore> = Arc::new(ironclaw_secrets::InMemorySecretStore::new());
+    if let Some(local_runtime) = Arc::get_mut(&mut store_graph.local_runtime) {
+        local_runtime.secret_store = Some(Arc::clone(&secret_store));
+    } else {
+        return Err(RebornBuildError::InvalidConfig {
+            reason: "local-dev secret store could not be attached".to_string(),
+        });
+    }
     let local_dev_trust_policy = Arc::new(builtin_first_party_trust_policy()?);
     let local_dev_trust_invalidation_bus = Arc::new(ironclaw_trust::InvalidationBus::new());
     let extension_registry = Arc::new(local_dev_builtin_extension_registry()?);
@@ -1669,6 +1677,7 @@ fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        secret_store: None,
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -1811,6 +1820,7 @@ fn build_local_dev_store_graph(
         budget_gate_store,
         skill_management,
         extension_management: None,
+        secret_store: None,
         runtime_http_egress: None,
         host_runtime_http_egress: None,
         skill_mounts,
@@ -4060,6 +4070,7 @@ mod tests {
             budget_gate_store: Arc::clone(&base_runtime.budget_gate_store),
             skill_management: Arc::clone(&base_runtime.skill_management),
             extension_management: base_runtime.extension_management.clone(),
+            secret_store: base_runtime.secret_store.clone(),
             runtime_http_egress: base_runtime.runtime_http_egress.clone(),
             host_runtime_http_egress: base_runtime.host_runtime_http_egress.clone(),
             skill_mounts: base_runtime.skill_mounts.clone(),
