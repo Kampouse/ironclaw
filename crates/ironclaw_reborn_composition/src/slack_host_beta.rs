@@ -1730,6 +1730,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect_err("outbound target providers require local runtime wiring");
 
@@ -2322,6 +2323,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Visible,
+            Vec::new(),
         )
         .expect("webui bundle");
         let app = webui_v2_app(
@@ -2407,6 +2409,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Visible,
+            Vec::new(),
         )
         .expect("webui bundle");
         let app = webui_v2_app(
@@ -2546,6 +2549,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         let caller = WebUiAuthenticatedCaller::new(
@@ -2641,6 +2645,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         let shared_subject = WebUiAuthenticatedCaller::new(
@@ -2777,6 +2782,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         upsert_slack_channel_route(&route_mount, "C0DYNAMIC", SHARED_SUBJECT).await;
@@ -2879,6 +2885,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
 
@@ -2916,6 +2923,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
 
@@ -2963,6 +2971,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         let caller = operator_caller();
@@ -3119,6 +3128,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
 
@@ -3198,6 +3208,7 @@ mod tests {
                     None,
                     Some(&mounts2),
                     SlackOperatorRouteVisibility::Hidden,
+                    Vec::new(),
                 )
                 .expect("webui bundle");
                 listed = bundle
@@ -3264,6 +3275,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         let targets = bundle
@@ -3351,6 +3363,7 @@ mod tests {
             None,
             Some(&mounts2),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         let targets = bundle
@@ -3393,6 +3406,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         let shared_subject = shared_subject_caller();
@@ -3508,6 +3522,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         upsert_slack_channel_route(&route_mount, "C0HOST", SHARED_SUBJECT).await;
@@ -3570,6 +3585,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         let shared_subject = shared_subject_caller();
@@ -3632,6 +3648,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Hidden,
+            Vec::new(),
         )
         .expect("webui bundle");
         upsert_slack_channel_route(&route_mount, "C0HOST", SHARED_SUBJECT).await;
@@ -3694,6 +3711,7 @@ mod tests {
             None,
             Some(&mounts),
             SlackOperatorRouteVisibility::Visible,
+            Vec::new(),
         )
         .expect("webui bundle");
         let app = webui_v2_app(
