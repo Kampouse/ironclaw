@@ -45,7 +45,7 @@ use ironclaw_host_api::{
 use ironclaw_resources::*;
 use ironclaw_wasm::wasm_sandbox_core::SandboxLimits;
 use ironclaw_wasm::{
-    PreparedWitTool, WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime,
+    PreparedWitTool, WasmHostError, WasmRuntimeHttpAdapter, WitToolHost, WitToolRequest, WitToolRuntime,
     WitToolRuntimeConfig,
 };
 use serde_json::{Value, json};
@@ -700,7 +700,7 @@ impl WasmRuntimeAdapter {
                 .prepare(request.capability_id.as_str(), &wasm_bytes)
                 .map_err(|error| DispatchError::Wasm {
                     kind: wasm_error_kind(&error),
-                    model_visible_cause: None,
+                    model_visible_cause: Some(error.to_string()),
                 })?,
         );
         let prepared = {
@@ -1370,3 +1370,249 @@ visibility = "api"
 input_schema_ref = "schemas/wasm-smoke/httptrap.input.v1.json"
 output_schema_ref = "schemas/wasm-smoke/httptrap.output.v1.json"
 "#;
+
+// ---------------------------------------------------------------------------
+// Nostr host-function integration tests
+// ---------------------------------------------------------------------------
+
+/// WAT fixture: copy of counter that also calls `nostr-sign-event` in execute.
+/// Uses identical structure to COUNTER_TOOL_WAT (known to work) with minimal changes.
+const NOSTR_SIGN_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (result i64)))
+  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (type (;3;) (func (param i32 i32 i32 i32 i32)))
+  (type (;4;) (func (param i32 i32) (result i32)))
+  (type (;5;) (func (param i32 i32 i32)))
+  (type (;6;) (func (param i32 i32 i32 i32 i32)))
+  (type (;7;) (func (param i32 i32 i32 i32 i32 i32)))
+  (import "near:agent/host@0.4.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.0" "nostr-sign-event" (func $nostr_sign_event (type 5)))
+  (import "near:agent/host@0.4.0" "nostr-publish-event" (func $nostr_publish_event (type 6)))
+  (import "near:agent/host@0.4.0" "nostr-subscribe-events" (func $nostr_subscribe_events (type 7)))
+  (memory (export "memory") 1)
+  (global $count (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{\22type\22:\22object\22}")
+  (data (i32.const 2048) "nostr sign tool")
+  (data (i32.const 3072) "1")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 15
+    i32.store
+    i32.const 32)
+  ;; execute: call nostr-sign-event with params, then return counter value.
+  ;; The params_ptr/len are the first two args. We call nostr-sign-event,
+  ;; ignore the result, then return the counter like the original.
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    ;; Allocate a large output buffer for result<string, string>:
+    ;; The host writes {disc: i32, ptr: i32, len: i32} plus string content.
+    global.get $count
+    i32.const 256
+    i32.add
+    global.set $count   ;; bump heap
+    local.get 0         ;; params_ptr
+    local.get 1         ;; params_len
+    global.get $count   ;; pass heap-256 as result_buf
+    i32.const 256
+    i32.sub
+    call $nostr_sign_event  ;; sign-event(params_ptr, params_len, result_buf)
+
+    ;; Now build response (same as counter — just return the count)
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    i32.const 3072
+    i32.store
+    i32.const 56
+    i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)
+  (func $post (param i32))
+  ;; Bump allocator: use $count as bump pointer (initialized to 0 by global $count)
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    local.get $new_size
+    i32.const 7
+    i32.add
+    i32.const -8
+    i32.and          ;; align up to 8
+    local.set $new_size
+    global.get $count
+    local.get $new_size
+    i32.add
+    local.tee $new_size  ;; reuse local as temp for result ptr
+    global.set $count
+    local.get $new_size)
+  (func $_initialize)
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
+"#;
+
+const NOSTR_SIGN_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "wasm-nostr-test"
+name = "WASM Nostr Test"
+version = "0.1.0"
+description = "Nostr sign integration test extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/nostr_sign.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "wasm-nostr-test.sign"
+description = "Sign a Nostr event through WASM"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "api"
+input_schema_ref = "schemas/wasm-nostr-test/sign.input.v1.json"
+output_schema_ref = "schemas/wasm-nostr-test/sign.output.v1.json"
+"#;
+
+/// Mock Nostr host that records calls and returns canned responses.
+struct MockWasmHostNostr {
+    sign_result: Mutex<Option<Result<String, WasmHostError>>>,
+    publish_result: Mutex<Option<Result<String, WasmHostError>>>,
+    subscribe_result: Mutex<Option<Result<String, WasmHostError>>>,
+    sign_calls: Mutex<Vec<String>>,
+    publish_calls: Mutex<Vec<(String, String)>>,
+    subscribe_calls: Mutex<Vec<(String, String, u32)>>,
+}
+
+impl MockWasmHostNostr {
+    fn new() -> Self {
+        Self {
+            sign_result: Mutex::new(None),
+            publish_result: Mutex::new(None),
+            subscribe_result: Mutex::new(None),
+            sign_calls: Mutex::new(Vec::new()),
+            publish_calls: Mutex::new(Vec::new()),
+            subscribe_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn with_sign_ok(signed_json: &str) -> Self {
+        let mock = Self::new();
+        *mock.sign_result.lock().unwrap() = Some(Ok(signed_json.to_string()));
+        mock
+    }
+}
+
+impl ironclaw_wasm::WasmHostNostr for MockWasmHostNostr {
+    fn sign_event(&self, unsigned_event_json: &str) -> Result<String, WasmHostError> {
+        self.sign_calls.lock().unwrap().push(unsigned_event_json.to_string());
+        self.sign_result
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or_else(|| Ok(r#"{"id":"test-id","pubkey":"test-pk","sig":"test-sig"}"#.to_string()))
+    }
+
+    fn publish_event(&self, relay_url: &str, signed_event_json: &str) -> Result<String, WasmHostError> {
+        self.publish_calls.lock().unwrap().push((relay_url.to_string(), signed_event_json.to_string()));
+        self.publish_result
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or(Ok("published-event-id".to_string()))
+    }
+
+    fn subscribe_events(&self, relay_url: &str, filter_json: &str, timeout_ms: u32) -> Result<String, WasmHostError> {
+        self.subscribe_calls.lock().unwrap().push((relay_url.to_string(), filter_json.to_string(), timeout_ms));
+        self.subscribe_result
+            .lock()
+            .unwrap()
+            .take()
+            .unwrap_or(Ok("[]".to_string()))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_nostr_sign_event_flows_through_host_pipeline() {
+    let signed_event = json!({
+        "id": "abc123",
+        "pubkey": "test-pubkey",
+        "created_at": 1690000000,
+        "kind": 1,
+        "tags": [],
+        "content": "hello from nostr",
+        "sig": "deadbeef1234"
+    });
+    let unsigned_event = json!({
+        "pubkey": "test-pubkey",
+        "created_at": 1690000000,
+        "kind": 1,
+        "tags": [],
+        "content": "hello from nostr"
+    });
+
+    let component = tool_component(NOSTR_SIGN_TOOL_WAT);
+    let fs = filesystem_with_wasm_component("wasm-nostr-test", "wasm/nostr_sign.wasm", &component).await;
+    let registry = Arc::new(registry_with_package(NOSTR_SIGN_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+
+    let mock_nostr = Arc::new(MockWasmHostNostr::with_sign_ok(&signed_event.to_string()));
+    let adapter = Arc::new(WasmRuntimeAdapter::with_host(
+        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+    ));
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let result = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-nostr-test.sign",
+            json!({"params": unsigned_event.to_string()}),
+        ))
+        .await
+        .expect("dispatch should succeed");
+
+    assert_eq!(result.runtime, RuntimeKind::Wasm);
+    // The tool calls nostr-sign-event but returns a fixed "1" counter output.
+    // Verify the mock was called with the unsigned event JSON.
+    let calls = mock_nostr.sign_calls.lock().unwrap();
+    assert!(calls.len() >= 1, "expected at least 1 nostr-sign-event call, got {}", calls.len());
+    assert!(calls[0].contains("hello from nostr"), "expected content in nostr input, got: {}", calls[0]);
+
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ],
+    );
+}
