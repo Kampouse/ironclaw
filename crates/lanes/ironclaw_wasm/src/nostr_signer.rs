@@ -105,6 +105,10 @@ fn decode_nsec_bech32(bech32_str: &str) -> Result<[u8; 32], NostrSignError> {
 
     let data_len = data_part_upper.len() - 6;
     let data_part_without_checksum = &data_part_upper[..data_len];
+    // SAFETY: Byte slicing on a String is safe here because `data_part_upper` has
+    // been `.to_uppercase()`-d from `data_part`, and all characters in the bech32
+    // data part are guaranteed to be ASCII (validated below against CHARSET, which
+    // contains only ASCII bytes). Therefore byte offsets equal char offsets.
 
     // Verify HRP (case-insensitive comparison)
     if hrp.to_lowercase() != "nsec" {
@@ -325,6 +329,12 @@ mod tests {
         let from_hex = decode_nostr_private_key(hex).unwrap();
         let from_nsec = decode_nostr_private_key(nsec).unwrap();
         assert_eq!(from_hex, from_nsec, "hex and nsec must decode to same bytes");
+    }
+
+    #[test]
+    fn test_reject_non_ascii_hex_input() {
+        // "aé1" has even byte length but contains non-ASCII é (U+00E9)
+        assert!(hex_decode("a\u{e9}1").is_err());
     }
 
     #[test]

@@ -156,6 +156,8 @@ pub async fn publish_nostr_event(
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
+    let connect_start = std::time::Instant::now();
+
     let connect_timeout = std::time::Duration::from_millis(
         remaining_deadline_ms
             .map(|d| (d as u64).min(DEFAULT_CONNECT_TIMEOUT_MS))
@@ -196,10 +198,15 @@ pub async fn publish_nostr_event(
         .await
         .map_err(|e| NostrRelayError::WebSocket(format!("WebSocket send failed: {e}")))?;
 
-    // Read OK response; clamp timeout to remaining deadline if present.
+    // Read OK response; clamp timeout to remaining deadline if present,
+    // accounting for time already spent on connect + send.
     let read_timeout = std::time::Duration::from_secs(10);
     let effective_timeout = match remaining_deadline_ms {
-        Some(deadline) => read_timeout.min(std::time::Duration::from_millis(deadline as u64)),
+        Some(deadline) => {
+            let elapsed_ms = connect_start.elapsed().as_millis() as u64;
+            let remaining_ms = (deadline as u64).saturating_sub(elapsed_ms);
+            read_timeout.min(std::time::Duration::from_millis(remaining_ms))
+        }
         None => read_timeout,
     };
 
@@ -262,6 +269,8 @@ pub async fn subscribe_nostr_events(
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
+    let connect_start = std::time::Instant::now();
+
     let connect_timeout = std::time::Duration::from_millis(
         remaining_deadline_ms
             .map(|d| (d as u64).min(DEFAULT_CONNECT_TIMEOUT_MS))
@@ -297,14 +306,20 @@ pub async fn subscribe_nostr_events(
         .await
         .map_err(|e| NostrRelayError::WebSocket(format!("WebSocket send failed: {e}")))?;
 
-    // Collect events; clamp collection timeout to remaining deadline if present.
+    // Collect events; clamp collection timeout to remaining deadline if present,
+    // accounting for time already spent on connect + send.
     let collection_timeout = match remaining_deadline_ms {
-        Some(deadline) => (timeout_ms as u64).min(deadline as u64),
+        Some(deadline) => {
+            let elapsed_ms = connect_start.elapsed().as_millis() as u64;
+            let remaining_ms = (deadline as u64).saturating_sub(elapsed_ms);
+            (timeout_ms as u64).min(remaining_ms)
+        }
         None => timeout_ms as u64,
     };
 
     let mut events: Vec<serde_json::Value> = Vec::new();
     let mut truncated = false;
+    let mut read_error: Option<String> = None;
 
     let _ = tokio::time::timeout(
         std::time::Duration::from_millis(collection_timeout),
@@ -313,12 +328,7 @@ pub async fn subscribe_nostr_events(
                 let msg = match msg_result {
                     Ok(m) => m,
                     Err(e) => {
-                        // Propagate WebSocket read errors instead of silently continuing.
-                        // Returning an Err here breaks the loop; the outer timeout ignores
-                        // the result but the error is logged implicitly.
-                        let _ = Err::<(), _>(NostrRelayError::WebSocket(format!(
-                            "WebSocket read error: {e}"
-                        )));
+                        read_error = Some(format!("WebSocket read error: {e}"));
                         break;
                     }
                 };
@@ -338,6 +348,11 @@ pub async fn subscribe_nostr_events(
         },
     )
     .await;
+
+    // If a WebSocket read error occurred, return it as an Err.
+    if let Some(reason) = read_error {
+        return Err(WasmHostError::from(NostrRelayError::WebSocket(reason)));
+    }
 
     // Send CLOSE
     let close_msg = serde_json::json!(["CLOSE", sub_id]);

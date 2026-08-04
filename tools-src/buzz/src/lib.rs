@@ -103,12 +103,12 @@ fn build_send_event(
 
     // Thread reply tag
     if let Some(ref reply_id) = reply_to_event_id {
-        tags.push(vec!["e".into(), reply_id.clone(), "".into(), "reply".into()]);
+        tags.push(vec!["e".into(), reply_id.to_ascii_lowercase(), "".into(), "reply".into()]);
     }
 
     // Mention tags
     for pk in mention_pubkeys {
-        tags.push(vec!["p".into(), pk.clone()]);
+        tags.push(vec!["p".into(), pk.to_ascii_lowercase()]);
     }
 
     Ok(UnsignedEvent {
@@ -537,6 +537,21 @@ mod tests {
         let result = build_send_event("test-uuid", "hi", &None, &["not64chars".into()], "pk", 1000);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("64-char hex"));
+    }
+
+    #[test]
+    fn test_build_send_event_lowercases_hex_ids() {
+        let event = build_send_event(
+            "test-uuid",
+            "hi",
+            &Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into()),
+            &["BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".into()],
+            "pk",
+            1000,
+        )
+        .unwrap();
+        assert_eq!(event.tags[1][1], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        assert_eq!(event.tags[2][1], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     }
 
     #[test]

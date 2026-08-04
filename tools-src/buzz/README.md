@@ -18,7 +18,7 @@ All signing is handled by the IronClaw host â€” your Nostr private key never ent
   rustup target add wasm32-wasip2
   ```
 - An IronClaw binary (built from this repo)
-- A Nostr keypair (nsec / npub)
+- A Nostr private key (nsec or 64-char hex)
 
 ## Setup
 
@@ -132,7 +132,7 @@ Buzz is loaded automatically from the build output. `--dev-tools` is optional â€
   "action": "send_message",
   "channel_id": "8b8e2988-c5d9-4ee1-adf7-5b4d37cccc9f",
   "content": "Hey @alice, check this out",
-  "mention_pubkeys": ["npub1..."]
+  "mention_pubkeys": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
 }
 ```
 
