@@ -198,10 +198,18 @@ impl bindings::near::agent::host::Host for StoreData {
         if let Some(error) = self.deadline_error() {
             return Err(error);
         }
+        let remaining_deadline_ms = self.remaining_timeout_ms(None);
+        let event_val: serde_json::Value = serde_json::from_str(&signed_event_json)
+            .unwrap_or_else(|_| serde_json::json!(signed_event_json));
+        let frame = serde_json::json!(["EVENT", event_val]);
+        let egress_bytes = serde_json::to_string(&frame)
+            .map(|s| s.len() as u64)
+            .unwrap_or(signed_event_json.len() as u64);
+        self.record_network_egress(egress_bytes);
         let result = self
             .host
             .nostr
-            .publish_event(&relay_url, &signed_event_json)
+            .publish_event(&relay_url, &signed_event_json, remaining_deadline_ms)
             .map_err(|error| error.to_string());
         if let Some(error) = self.deadline_error() {
             return Err(error);
@@ -218,10 +226,17 @@ impl bindings::near::agent::host::Host for StoreData {
         if let Some(error) = self.deadline_error() {
             return Err(error);
         }
+        let remaining_deadline_ms = self.remaining_timeout_ms(Some(timeout_ms));
+        let req_id = "wasm-subscribe";
+        let frame = serde_json::json!(["REQ", req_id, serde_json::from_str::<serde_json::Value>(&filter_json).unwrap_or_else(|_| serde_json::json!(filter_json))]);
+        let egress_bytes = serde_json::to_string(&frame)
+            .map(|s| s.len() as u64)
+            .unwrap_or(filter_json.len() as u64);
+        self.record_network_egress(egress_bytes);
         let result = self
             .host
             .nostr
-            .subscribe_events(&relay_url, &filter_json, timeout_ms)
+            .subscribe_events(&relay_url, &filter_json, timeout_ms, remaining_deadline_ms)
             .map_err(|error| error.to_string());
         if let Some(error) = self.deadline_error() {
             return Err(error);

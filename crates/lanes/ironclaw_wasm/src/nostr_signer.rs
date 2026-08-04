@@ -61,13 +61,17 @@ pub fn decode_nostr_private_key(key: &str) -> Result<[u8; 32], NostrSignError> {
 
 /// Decode hex string to bytes (no external dependency).
 fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
+    // Reject non-ASCII early — hex strings must only contain 0-9a-fA-F
+    if !s.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
+        return Err(());
+    }
     if s.len() % 2 != 0 {
         return Err(());
     }
     let mut bytes = Vec::with_capacity(s.len() / 2);
-    for i in (0..s.len()).step_by(2) {
-        let byte = u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| ())?;
-        bytes.push(byte);
+    for chunk in s.as_bytes().chunks(2) {
+        bytes.push(u8::from_str_radix(
+            std::str::from_utf8(chunk).map_err(|_| ())?, 16).map_err(|_| ())?);
     }
     Ok(bytes)
 }
@@ -347,15 +351,9 @@ mod tests {
         let privkey = make_test_privkey();
         let pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
-        let unsigned = r#"{
-            "pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
-            "created_at": 1690000000,
-            "kind": 1,
-            "tags": [],
-            "content": "hello from nostr"
-        }"#;
+        let unsigned = format!(r#"{{"pubkey": "{}", "created_at": 1690000000, "kind": 1, "tags": [], "content": "hello from nostr"}}"#, pubkey);
 
-        let result = sign_nostr_event(unsigned, &privkey).expect("signing failed");
+        let result = sign_nostr_event(&unsigned, &privkey).expect("signing failed");
         let event: serde_json::Value = serde_json::from_str(&result).unwrap();
 
         // Must have id and sig

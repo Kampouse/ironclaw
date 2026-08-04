@@ -61,7 +61,7 @@ enum BuzzAction {
 
 // ── Event construction ─────────────────────────────────────────────────
 
-#[derive(serde::Serialize)]
+#[derive(Debug, serde::Serialize)]
 struct UnsignedEvent {
     kind: u64,
     content: String,
@@ -77,7 +77,25 @@ fn build_send_event(
     mention_pubkeys: &[String],
     pubkey: &str,
     now: u64,
-) -> UnsignedEvent {
+) -> Result<UnsignedEvent, String> {
+    // Validate reply_to_event_id: must be exactly 64 hex chars if present
+    if let Some(ref reply_id) = reply_to_event_id {
+        if reply_id.len() != 64 || !reply_id.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "reply_to_event_id must be a 64-char hex string, got: {reply_id}"
+            ));
+        }
+    }
+
+    // Validate mention_pubkeys: each must be exactly 64 hex chars
+    for pk in mention_pubkeys {
+        if pk.len() != 64 || !pk.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
+            return Err(format!(
+                "mention_pubkey must be a 64-char hex string, got: {pk}"
+            ));
+        }
+    }
+
     let mut tags = Vec::new();
 
     // Buzz channel tag (root event reference)
@@ -93,20 +111,26 @@ fn build_send_event(
         tags.push(vec!["p".into(), pk.clone()]);
     }
 
-    UnsignedEvent {
+    Ok(UnsignedEvent {
         kind: 1, // NIP-01 text note
         content: content.to_string(),
         tags,
         created_at: now,
         pubkey: pubkey.to_string(),
-    }
+    })
 }
 
 fn build_subscribe_filter(
     channel_id: &str,
-    _since_event_id: Option<&str>, // TODO: add `since` timestamp filter
+    _since_event_id: Option<&str>,
     limit: Option<u32>,
 ) -> serde_json::Value {
+    // NOTE: `since_event_id` is intentionally not used here. Nostr event IDs are
+    // SHA-256 hashes (opaque identifiers), not monotonic timestamps. NIP-01 `since`
+    // filters accept a Unix timestamp, not an event ID. Converting an event ID to the
+    // corresponding creation timestamp would require either a relay query or local
+    // index lookup, neither of which is available at filter-build time.
+    // TODO: accept an optional `since_timestamp` parameter and pass it as `"since"` in the filter.
     let mut filter = serde_json::Map::new();
 
     // Filter by channel: NIP-01 `#e` tag
@@ -216,7 +240,7 @@ fn handle_send_message(
         mentions,
         &pubkey,
         now,
-    );
+    )?;
     let unsigned_json =
         serde_json::to_string(&unsigned).map_err(|e| format!("Failed to serialize event: {e}"))?;
 
@@ -260,10 +284,12 @@ fn handle_subscribe(
     let events_json = near::agent::host::nostr_subscribe_events(relay, &filter_json, timeout)
         .map_err(|e| format!("Failed to subscribe: {e}"))?;
 
+    let events: serde_json::Value = serde_json::from_str::<serde_json::Value>(&events_json)
+        .map_err(|e| format!("Failed to parse relay response: {e}"))?;
+
     let output = serde_json::json!({
         "channel_id": channel_id,
-        "events": serde_json::from_str::<serde_json::Value>(&events_json)
-            .unwrap_or(serde_json::Value::Array(vec![])),
+        "events": events,
         "status": "ok"
     });
     Ok(serde_json::to_string(&output).map_err(|e| format!("{e}"))?)
@@ -462,7 +488,7 @@ mod tests {
 
     #[test]
     fn test_build_send_event() {
-        let event = build_send_event("test-uuid", "hello", &None, &[], "pk", 1000);
+        let event = build_send_event("test-uuid", "hello", &None, &[], "pk", 1000).unwrap();
         assert_eq!(event.kind, 1);
         assert_eq!(event.content, "hello");
         assert_eq!(event.tags.len(), 1); // root channel tag
@@ -471,16 +497,46 @@ mod tests {
 
     #[test]
     fn test_build_send_event_with_reply() {
-        let event = build_send_event("test-uuid", "reply", &Some("event123".into()), &[], "pk", 1000);
+        let event = build_send_event(
+            "test-uuid",
+            "reply",
+            &Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
+            &[],
+            "pk",
+            1000,
+        )
+        .unwrap();
         assert_eq!(event.tags.len(), 2);
         assert_eq!(event.tags[1][3], "reply");
     }
 
     #[test]
     fn test_build_send_event_with_mentions() {
-        let event = build_send_event("test-uuid", "hi", &None, &["pubkey1".into()], "pk", 1000);
+        let event = build_send_event(
+            "test-uuid",
+            "hi",
+            &None,
+            &["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into()],
+            "pk",
+            1000,
+        )
+        .unwrap();
         assert_eq!(event.tags.len(), 2);
         assert_eq!(event.tags[1][0], "p");
+    }
+
+    #[test]
+    fn test_build_send_event_rejects_short_reply_id() {
+        let result = build_send_event("test-uuid", "hi", &Some("short".into()), &[], "pk", 1000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("64-char hex"));
+    }
+
+    #[test]
+    fn test_build_send_event_rejects_short_mention_pubkey() {
+        let result = build_send_event("test-uuid", "hi", &None, &["not64chars".into()], "pk", 1000);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("64-char hex"));
     }
 
     #[test]

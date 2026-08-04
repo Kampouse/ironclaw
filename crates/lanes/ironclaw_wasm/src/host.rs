@@ -645,17 +645,27 @@ pub trait WasmHostNostr: Send + Sync {
     /// Publish a signed Nostr event to a relay via WebSocket.
     ///
     /// Connects, sends EVENT, waits for OK/NACK. Returns event ID on success.
-    fn publish_event(&self, relay_url: &str, signed_event_json: &str) -> Result<String, WasmHostError>;
+    /// `remaining_deadline_ms` is the wall-clock budget left before the WASM
+    /// execution deadline; the impl should respect it when doing relay I/O.
+    fn publish_event(
+        &self,
+        relay_url: &str,
+        signed_event_json: &str,
+        remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError>;
 
     /// Subscribe to Nostr events from a relay via WebSocket.
     ///
     /// Sends REQ with filters, collects events for `timeout_ms`, sends CLOSE,
     /// returns JSON array of matching events.
+    /// `remaining_deadline_ms` is the wall-clock budget left before the WASM
+    /// execution deadline; the impl should respect it when doing relay I/O.
     fn subscribe_events(
         &self,
         relay_url: &str,
         filter_json: &str,
         timeout_ms: u32,
+        remaining_deadline_ms: Option<u32>,
     ) -> Result<String, WasmHostError>;
 }
 
@@ -670,7 +680,12 @@ impl WasmHostNostr for DenyWasmHostNostr {
         ))
     }
 
-    fn publish_event(&self, _relay_url: &str, _signed_event_json: &str) -> Result<String, WasmHostError> {
+    fn publish_event(
+        &self,
+        _relay_url: &str,
+        _signed_event_json: &str,
+        _remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
         Err(WasmHostError::Unavailable(
             "WASM Nostr relay publishing is not configured".to_string(),
         ))
@@ -681,6 +696,7 @@ impl WasmHostNostr for DenyWasmHostNostr {
         _relay_url: &str,
         _filter_json: &str,
         _timeout_ms: u32,
+        _remaining_deadline_ms: Option<u32>,
     ) -> Result<String, WasmHostError> {
         Err(WasmHostError::Unavailable(
             "WASM Nostr relay subscription is not configured".to_string(),

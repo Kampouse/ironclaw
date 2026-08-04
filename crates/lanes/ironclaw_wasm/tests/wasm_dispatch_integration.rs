@@ -1457,12 +1457,11 @@ const NOSTR_SIGN_TOOL_WAT: &str = r#"
     i32.const -8
     i32.and          ;; align up to 8
     local.set $new_size
+    global.get $count  ;; pre-bump value = allocation start
     global.get $count
     local.get $new_size
     i32.add
-    local.tee $new_size  ;; reuse local as temp for result ptr
-    global.set $count
-    local.get $new_size)
+    global.set $count)
   (func $_initialize)
   (export "near:agent/tool@0.4.0#execute" (func $execute))
   (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
@@ -1541,7 +1540,12 @@ impl ironclaw_wasm::WasmHostNostr for MockWasmHostNostr {
             .unwrap_or_else(|| Ok(r#"{"id":"test-id","pubkey":"test-pk","sig":"test-sig"}"#.to_string()))
     }
 
-    fn publish_event(&self, relay_url: &str, signed_event_json: &str) -> Result<String, WasmHostError> {
+    fn publish_event(
+        &self,
+        relay_url: &str,
+        signed_event_json: &str,
+        _remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
         self.publish_calls.lock().unwrap().push((relay_url.to_string(), signed_event_json.to_string()));
         self.publish_result
             .lock()
@@ -1550,7 +1554,13 @@ impl ironclaw_wasm::WasmHostNostr for MockWasmHostNostr {
             .unwrap_or(Ok("published-event-id".to_string()))
     }
 
-    fn subscribe_events(&self, relay_url: &str, filter_json: &str, timeout_ms: u32) -> Result<String, WasmHostError> {
+    fn subscribe_events(
+        &self,
+        relay_url: &str,
+        filter_json: &str,
+        timeout_ms: u32,
+        _remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
         self.subscribe_calls.lock().unwrap().push((relay_url.to_string(), filter_json.to_string(), timeout_ms));
         self.subscribe_result
             .lock()
@@ -1604,7 +1614,7 @@ async fn wasm_nostr_sign_event_flows_through_host_pipeline() {
     // The tool calls nostr-sign-event but returns a fixed "1" counter output.
     // Verify the mock was called with the unsigned event JSON.
     let calls = mock_nostr.sign_calls.lock().unwrap();
-    assert!(calls.len() >= 1, "expected at least 1 nostr-sign-event call, got {}", calls.len());
+    assert_eq!(calls.len(), 1, "expected exactly 1 nostr-sign-event call, got {}", calls.len());
     assert!(calls[0].contains("hello from nostr"), "expected content in nostr input, got: {}", calls[0]);
 
     assert_event_kinds(
