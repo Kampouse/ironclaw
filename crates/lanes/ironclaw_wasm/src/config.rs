@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::wasm_sandbox_core::SandboxLimits;
 
 /// WIT package version supported by the Reborn WASM tool runtime.
-pub const WIT_TOOL_VERSION: &str = "0.3.0";
+pub const WIT_TOOL_VERSION: &str = "0.4.0";
 
 /// Source text of the canonical tool ABI, `wit/tool.wit`, which this crate
 /// owns.

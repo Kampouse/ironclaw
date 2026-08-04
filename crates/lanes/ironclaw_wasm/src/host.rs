@@ -630,6 +630,64 @@ impl WasmHostClock for SystemWasmHostClock {
     }
 }
 
+/// Nostr capability seam for WASM tools.
+///
+/// The host holds the private key and performs relay I/O on behalf of the
+/// WASM guest. WASM never sees secrets or opens network connections directly.
+pub trait WasmHostNostr: Send + Sync {
+    /// Sign an unsigned Nostr event using the host-held private key.
+    ///
+    /// The unsigned event JSON must contain: `pubkey`, `created_at`, `kind`,
+    /// `tags`, `content`. Returns the complete signed event JSON with `id`
+    /// and `sig` fields, or an error string.
+    fn sign_event(&self, unsigned_event_json: &str) -> Result<String, WasmHostError>;
+
+    /// Publish a signed Nostr event to a relay via WebSocket.
+    ///
+    /// Connects, sends EVENT, waits for OK/NACK. Returns event ID on success.
+    fn publish_event(&self, relay_url: &str, signed_event_json: &str) -> Result<String, WasmHostError>;
+
+    /// Subscribe to Nostr events from a relay via WebSocket.
+    ///
+    /// Sends REQ with filters, collects events for `timeout_ms`, sends CLOSE,
+    /// returns JSON array of matching events.
+    fn subscribe_events(
+        &self,
+        relay_url: &str,
+        filter_json: &str,
+        timeout_ms: u32,
+    ) -> Result<String, WasmHostError>;
+}
+
+/// Fail-closed Nostr host service.
+#[derive(Debug, Default)]
+pub struct DenyWasmHostNostr;
+
+impl WasmHostNostr for DenyWasmHostNostr {
+    fn sign_event(&self, _unsigned_event_json: &str) -> Result<String, WasmHostError> {
+        Err(WasmHostError::Unavailable(
+            "WASM Nostr signing is not configured".to_string(),
+        ))
+    }
+
+    fn publish_event(&self, _relay_url: &str, _signed_event_json: &str) -> Result<String, WasmHostError> {
+        Err(WasmHostError::Unavailable(
+            "WASM Nostr relay publishing is not configured".to_string(),
+        ))
+    }
+
+    fn subscribe_events(
+        &self,
+        _relay_url: &str,
+        _filter_json: &str,
+        _timeout_ms: u32,
+    ) -> Result<String, WasmHostError> {
+        Err(WasmHostError::Unavailable(
+            "WASM Nostr relay subscription is not configured".to_string(),
+        ))
+    }
+}
+
 /// Host services made available to one WASM tool execution.
 #[derive(Clone)]
 pub struct WitToolHost {
@@ -638,6 +696,7 @@ pub struct WitToolHost {
     pub(crate) secrets: Arc<dyn WasmHostSecrets>,
     pub(crate) tools: Arc<dyn WasmHostTools>,
     pub(crate) clock: Arc<dyn WasmHostClock>,
+    pub(crate) nostr: Arc<dyn WasmHostNostr>,
 }
 
 impl WitToolHost {
@@ -648,6 +707,7 @@ impl WitToolHost {
             secrets: Arc::new(DenyWasmHostSecrets),
             tools: Arc::new(DenyWasmHostTools),
             clock: Arc::new(SystemWasmHostClock),
+            nostr: Arc::new(DenyWasmHostNostr),
         }
     }
 
@@ -688,6 +748,14 @@ impl WitToolHost {
         T: WasmHostClock + 'static,
     {
         self.clock = clock;
+        self
+    }
+
+    pub fn with_nostr<T>(mut self, nostr: Arc<T>) -> Self
+    where
+        T: WasmHostNostr + 'static,
+    {
+        self.nostr = nostr;
         self
     }
 }

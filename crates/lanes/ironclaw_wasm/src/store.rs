@@ -174,6 +174,60 @@ impl bindings::near::agent::host::Host for StoreData {
         }
         exists
     }
+
+    fn nostr_sign_event(&mut self, unsigned_event_json: String) -> Result<String, String> {
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        let result = self
+            .host
+            .nostr
+            .sign_event(&unsigned_event_json)
+            .map_err(|error| error.to_string());
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        result
+    }
+
+    fn nostr_publish_event(
+        &mut self,
+        relay_url: String,
+        signed_event_json: String,
+    ) -> Result<String, String> {
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        let result = self
+            .host
+            .nostr
+            .publish_event(&relay_url, &signed_event_json)
+            .map_err(|error| error.to_string());
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        result
+    }
+
+    fn nostr_subscribe_events(
+        &mut self,
+        relay_url: String,
+        filter_json: String,
+        timeout_ms: u32,
+    ) -> Result<String, String> {
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        let result = self
+            .host
+            .nostr
+            .subscribe_events(&relay_url, &filter_json, timeout_ms)
+            .map_err(|error| error.to_string());
+        if let Some(error) = self.deadline_error() {
+            return Err(error);
+        }
+        result
+    }
 }
 
 fn truncate_log_message(message: String) -> String {
