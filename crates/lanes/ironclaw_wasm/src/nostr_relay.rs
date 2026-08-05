@@ -1,32 +1,25 @@
 //! Nostr relay WebSocket communication for WASM tools.
 //!
 //! Implements host-side relay I/O: publish events and subscribe to event streams.
-//! All relay connections go through SSRF guards that reject private/internal IPs.
-
-use std::net::IpAddr;
+//! Relay URL validation (SSRF, scheme, private-IP checks) is the host adapter's
+//! responsibility — this module trusts that callers have validated URLs.
 
 use crate::WasmHostError;
 
 /// Error type for Nostr relay operations.
 #[derive(Debug, thiserror::Error)]
 pub enum NostrRelayError {
-    #[error("SSRF check failed: {0}")]
-    SsrfRejected(String),
-
-    #[error("WebSocket error: {0}")]
+    #[error("{0}")]
     WebSocket(String),
-
-    #[error("Relay error: {0}")]
+    #[error("{0}")]
     Relay(String),
-
-    #[error("Invalid input: {0}")]
+    #[error("{0}")]
     InvalidInput(String),
 }
 
 impl From<NostrRelayError> for WasmHostError {
     fn from(err: NostrRelayError) -> Self {
-        match &err {
-            NostrRelayError::SsrfRejected(msg) => WasmHostError::Denied(msg.clone()),
+        match err {
             NostrRelayError::WebSocket(msg) => WasmHostError::Failed(msg.clone()),
             NostrRelayError::Relay(msg) => WasmHostError::Failed(msg.clone()),
             NostrRelayError::InvalidInput(msg) => WasmHostError::Failed(msg.clone()),
@@ -46,101 +39,15 @@ const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MiB
 /// Default connect timeout in milliseconds.
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
 
-/// SSRF guard for WebSocket relay URLs.
+/// Derive a connect timeout from the remaining execution deadline.
 ///
-/// Rejects connections to private/internal IP addresses to prevent
-/// server-side request forgery.
-pub fn reject_ws_relay_url(url: &str) -> Result<(), NostrRelayError> {
-    let parsed: url::Url = url::Url::parse(url)
-        .map_err(|e| NostrRelayError::SsrfRejected(format!("Invalid relay URL: {e}")))?;
-
-    if parsed.scheme() != "ws" && parsed.scheme() != "wss" {
-        return Err(NostrRelayError::SsrfRejected(format!(
-            "Relay URL must use ws:// or wss://, got {}",
-            parsed.scheme()
-        )));
-    }
-
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(NostrRelayError::SsrfRejected(
-            "Relay URL must not contain userinfo".to_string(),
-        ));
-    }
-
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| NostrRelayError::SsrfRejected("Relay URL must have a host".to_string()))?;
-
-    // Reject bare IP addresses that are private
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_private_ip(ip) {
-            return Err(NostrRelayError::SsrfRejected(format!(
-                "Relay URL points to private/reserved IP: {ip}"
-            )));
-        }
-        return Ok(());
-    }
-
-    // For domain names, attempt DNS resolution to catch DNS-rebinding to private IPs
-    let port = parsed.port().unwrap_or(80);
-    if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&format!("{}:{}", host, port)) {
-        for addr in addrs {
-            if is_private_ip(addr.ip()) {
-                return Err(NostrRelayError::SsrfRejected(format!(
-                    "Relay URL hostname resolves to private/reserved IP: {} -> {}",
-                    host,
-                    addr.ip()
-                )));
-            }
-        }
-    }
-
-    Ok(())
-}
-
-/// Check if an IP address is private, loopback, link-local, reserved, multicast,
-/// broadcast, documentation, or otherwise unsuitable for external relay connections.
-///
-/// Canonicalizes IPv4-mapped IPv6 addresses before classification to prevent
-/// SSRF bypass via `::ffff:127.0.0.1` style addresses.
-fn is_private_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(v4) => is_private_ipv4(&v4),
-        IpAddr::V6(v6) => {
-            // Canonicalize IPv4-mapped IPv6 addresses (::ffff:a.b.c.d)
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                return is_private_ipv4(&v4);
-            }
-
-            v6.is_loopback()
-                || v6.is_unspecified()
-                // IPv6 unique local (fc00::/7)
-                || (v6.segments()[0] & 0xFE00) == 0xFC00
-                // IPv6 link-local (fe80::/10)
-                || (v6.segments()[0] & 0xFFC0) == 0xFE80
-                // IPv6 6to4 relay (2002::/16)
-                || v6.segments()[0] == 0x2002
-                // IPv6 Teredo (2001::/32)
-                || (v6.segments()[0] == 0x2001 && v6.segments()[1] == 0x0000)
-        }
-    }
-}
-
-/// IPv4-specific private/reserved address check.
-fn is_private_ipv4(v4: &std::net::Ipv4Addr) -> bool {
-    v4.is_loopback()
-        || v4.is_private()
-        || v4.is_link_local()
-        || v4.is_unspecified()
-        // Carrier-grade NAT (100.64.0.0/10)
-        || (v4.octets()[0] == 100 && (v4.octets()[1] & 0xC0) == 64)
-        // Multicast (224.0.0.0/4)
-        || v4.is_multicast()
-        // Reserved/broadcast/documentation: first octet >= 240
-        // 240.0.0.0/4 includes 255.255.255.255 broadcast, documentation (TEST-NET-1
-        // through TEST-NET-3 are in 192/203 so they're covered by is_private),
-        // and reserved-for-future-use ranges.
-        || v4.octets()[0] >= 240
+/// Caps at `DEFAULT_CONNECT_TIMEOUT_MS` (10s) to avoid long hangs.
+/// Falls back to the default when no deadline is specified.
+fn connect_timeout_for(remaining_deadline_ms: Option<u32>) -> std::time::Duration {
+    let ms = remaining_deadline_ms
+        .map(|d| (d as u64).min(DEFAULT_CONNECT_TIMEOUT_MS))
+        .unwrap_or(DEFAULT_CONNECT_TIMEOUT_MS);
+    std::time::Duration::from_millis(ms)
 }
 
 /// Publish a signed Nostr event to a relay via WebSocket.
@@ -157,18 +64,13 @@ pub async fn publish_nostr_event(
     signed_event_json: &str,
     remaining_deadline_ms: Option<u32>,
 ) -> Result<String, WasmHostError> {
-    reject_ws_relay_url(relay_url)?;
-
+    // Relay URL SSRF validation is the caller's responsibility (host adapter).
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
     let connect_start = std::time::Instant::now();
 
-    let connect_timeout = std::time::Duration::from_millis(
-        remaining_deadline_ms
-            .map(|d| (d as u64).min(DEFAULT_CONNECT_TIMEOUT_MS))
-            .unwrap_or(DEFAULT_CONNECT_TIMEOUT_MS),
-    );
+    let connect_timeout = connect_timeout_for(remaining_deadline_ms);
 
     let (ws_stream, _) = tokio::time::timeout(connect_timeout, async {
         tokio_tungstenite::connect_async_with_config(
@@ -208,7 +110,7 @@ pub async fn publish_nostr_event(
 
     let msg = serde_json::json!(["EVENT", event_val]);
     write
-        .send(Message::Text(msg.to_string().into()))
+        .send(Message::Text(msg.to_string()))
         .await
         .map_err(|e| NostrRelayError::WebSocket(format!("WebSocket send failed: {e}")))?;
 
@@ -228,30 +130,30 @@ pub async fn publish_nostr_event(
         while let Some(msg_result) = read.next().await {
             let msg = msg_result
                 .map_err(|e| NostrRelayError::WebSocket(format!("WebSocket read error: {e}")))?;
-            if let Message::Text(text) = msg {
-                if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
-                    if arr.len() >= 3 && arr[0] == "OK" {
-                        let relay_id = arr[1].as_str().unwrap_or("").to_string();
-                        let accepted = arr.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
+            if let Message::Text(text) = msg
+                && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text)
+                    && arr.len() >= 3
+                    && arr[0] == "OK"
+            {
+                let relay_id = arr[1].as_str().unwrap_or("").to_string();
+                let accepted = arr.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
 
-                        if !accepted {
-                            let reason =
-                                arr.get(3).and_then(|v| v.as_str()).unwrap_or("unknown");
-                            return Err(NostrRelayError::Relay(format!(
-                                "Relay rejected: {reason}"
-                            )));
-                        }
-
-                        // Verify relay-supplied ID matches the signed event ID.
-                        if relay_id != expected_id {
-                            return Err(NostrRelayError::Relay(format!(
-                                "Relay returned different event ID: expected {expected_id}, got {relay_id}"
-                            )));
-                        }
-
-                        return Ok::<String, NostrRelayError>(relay_id);
-                    }
+                if !accepted {
+                    let reason =
+                        arr.get(3).and_then(|v| v.as_str()).unwrap_or("unknown");
+                    return Err(NostrRelayError::Relay(format!(
+                        "Relay rejected: {reason}"
+                    )));
                 }
+
+                // Verify relay-supplied ID matches the signed event ID.
+                if relay_id != expected_id {
+                    return Err(NostrRelayError::Relay(format!(
+                        "Relay returned different event ID: expected {expected_id}, got {relay_id}"
+                    )));
+                }
+
+                return Ok::<String, NostrRelayError>(relay_id);
             }
         }
         Err(NostrRelayError::Relay(
@@ -278,18 +180,13 @@ pub async fn subscribe_nostr_events(
     timeout_ms: u32,
     remaining_deadline_ms: Option<u32>,
 ) -> Result<String, WasmHostError> {
-    reject_ws_relay_url(relay_url)?;
-
+    // Relay URL SSRF validation is the caller's responsibility (host adapter).
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
     let connect_start = std::time::Instant::now();
 
-    let connect_timeout = std::time::Duration::from_millis(
-        remaining_deadline_ms
-            .map(|d| (d as u64).min(DEFAULT_CONNECT_TIMEOUT_MS))
-            .unwrap_or(DEFAULT_CONNECT_TIMEOUT_MS),
-    );
+    let connect_timeout = connect_timeout_for(remaining_deadline_ms);
 
     let (ws_stream, _) = tokio::time::timeout(connect_timeout, async {
         tokio_tungstenite::connect_async_with_config(
@@ -324,7 +221,7 @@ pub async fn subscribe_nostr_events(
     let req_text = serde_json::to_string(&req_msg)
         .map_err(|e| NostrRelayError::InvalidInput(format!("Failed to serialize REQ message: {e}")))?;
     write
-        .send(Message::Text(req_text.into()))
+        .send(Message::Text(req_text))
         .await
         .map_err(|e| NostrRelayError::WebSocket(format!("WebSocket send failed: {e}")))?;
 
@@ -355,19 +252,19 @@ pub async fn subscribe_nostr_events(
                         break;
                     }
                 };
-                if let Message::Text(text) = msg {
-                    if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
-                        if arr.len() >= 3 && arr[0] == "EVENT" {
-                            // arr[1] is sub_id, arr[2] is the event
-                            collected_bytes = collected_bytes.saturating_add(text.len());
-                            events.push(arr[2].clone());
-                            if events.len() >= MAX_COLLECTED_EVENTS
-                                || collected_bytes >= MAX_COLLECTED_BYTES
-                            {
-                                truncated = true;
-                                break;
-                            }
-                        }
+                if let Message::Text(text) = msg
+                    && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text)
+                        && arr.len() >= 3
+                        && arr[0] == "EVENT"
+                {
+                    // arr[1] is sub_id, arr[2] is the event
+                    collected_bytes = collected_bytes.saturating_add(text.len());
+                    events.push(arr[2].clone());
+                    if events.len() >= MAX_COLLECTED_EVENTS
+                        || collected_bytes >= MAX_COLLECTED_BYTES
+                    {
+                        truncated = true;
+                        break;
                     }
                 }
             }
@@ -383,7 +280,7 @@ pub async fn subscribe_nostr_events(
     // Send CLOSE
     let close_msg = serde_json::json!(["CLOSE", sub_id]);
     let _ = write
-        .send(Message::Text(close_msg.to_string().into()))
+        .send(Message::Text(close_msg.to_string()))
         .await;
 
     // Return structured response with truncation indicator.
@@ -393,120 +290,4 @@ pub async fn subscribe_nostr_events(
     });
     serde_json::to_string(&response)
         .map_err(|e| WasmHostError::Failed(format!("Failed to serialize events: {e}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_reject_private_ip_url() {
-        assert!(reject_ws_relay_url("ws://127.0.0.1:8080").is_err());
-        assert!(reject_ws_relay_url("ws://10.0.0.1").is_err());
-        assert!(reject_ws_relay_url("ws://192.168.1.1:8080").is_err());
-        assert!(reject_ws_relay_url("wss://172.16.0.1").is_err());
-        assert!(reject_ws_relay_url("wss://0.0.0.0:8080").is_err());
-    }
-
-    #[test]
-    fn test_reject_non_ws_scheme() {
-        assert!(reject_ws_relay_url("http://relay.example.com").is_err());
-        assert!(reject_ws_relay_url("https://relay.example.com").is_err());
-        assert!(reject_ws_relay_url("ftp://relay.example.com").is_err());
-    }
-
-    #[test]
-    fn test_reject_hostname_resolving_to_loopback() {
-        // "localhost" always resolves to 127.0.0.1 — exercises the DNS-resolution
-        // branch of reject_ws_relay_url, not just the literal-IP path.
-        let result = reject_ws_relay_url("ws://localhost:8080");
-        assert!(result.is_err());
-        let msg = format!("{result:?}");
-        assert!(msg.contains("private"), "expected SSRF rejection for localhost, got: {msg}");
-    }
-
-    #[test]
-    fn test_accept_valid_ws_url() {
-        // Uses an unresolvable domain that passes scheme/structure checks.
-        // DNS resolution will fail but that is not SSRF rejection.
-        let result = reject_ws_relay_url("wss://relay.example.invalid");
-        // Should not be SsrfRejected; it may fail on DNS but not SSRF grounds.
-        match result {
-            Err(NostrRelayError::SsrfRejected(_)) => {
-                panic!("Well-formed URL should not trigger SSRF rejection")
-            }
-            _ => {} // DNS lookup may fail, which is acceptable.
-        }
-    }
-
-    #[test]
-    fn test_reject_url_with_userinfo() {
-        assert!(reject_ws_relay_url("ws://user:pass@relay.example.com").is_err());
-    }
-
-    #[test]
-    fn test_reject_invalid_url() {
-        assert!(reject_ws_relay_url("not-a-url").is_err());
-    }
-
-    #[test]
-    fn test_reject_url_without_host() {
-        assert!(reject_ws_relay_url("wss://:8080").is_err());
-    }
-
-    #[test]
-    fn test_is_private_ip_loopback() {
-        assert!(is_private_ip("127.0.0.1".parse().unwrap()));
-        assert!(is_private_ip("::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_private_ranges() {
-        assert!(is_private_ip("10.0.0.1".parse().unwrap()));
-        assert!(is_private_ip("172.16.0.1".parse().unwrap()));
-        assert!(is_private_ip("192.168.1.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_private_ip_link_local() {
-        assert!(is_private_ip("169.254.1.1".parse().unwrap()));
-        assert!(is_private_ip("fe80::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_is_not_private_ip() {
-        assert!(!is_private_ip("8.8.8.8".parse().unwrap()));
-        assert!(!is_private_ip("1.1.1.1".parse().unwrap()));
-        assert!(!is_private_ip("2001:4860:4860::8888".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_reject_ipv4_mapped_loopback() {
-        // ::ffff:127.0.0.1 — IPv4-mapped IPv6 loopback must be rejected.
-        assert!(is_private_ip("::ffff:127.0.0.1".parse().unwrap()));
-        // ::ffff:192.168.1.1 — IPv4-mapped private IPv4 must be rejected.
-        assert!(is_private_ip("::ffff:192.168.1.1".parse().unwrap()));
-        // ::ffff:10.0.0.1 — IPv4-mapped RFC 1918 must be rejected.
-        assert!(is_private_ip("::ffff:10.0.0.1".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_reject_6to4_teredo() {
-        // 6to4 relay prefix (2002::/16)
-        assert!(is_private_ip("2002:c0a8:101::1".parse().unwrap()));
-        // Teredo prefix (2001::/32) — note: not to be confused with 2001:db8 (doc)
-        assert!(is_private_ip("2001:0:1234::1".parse().unwrap()));
-    }
-
-    #[test]
-    fn test_reject_multicast_broadcast() {
-        // IPv4 multicast
-        assert!(is_private_ip("224.0.0.1".parse().unwrap()));
-        assert!(is_private_ip("239.255.255.255".parse().unwrap()));
-        // IPv4 broadcast
-        assert!(is_private_ip("255.255.255.255".parse().unwrap()));
-        // IPv4 reserved/documentation (first octet >= 240)
-        assert!(is_private_ip("240.0.0.1".parse().unwrap()));
-        assert!(is_private_ip("250.0.0.1".parse().unwrap()));
-    }
 }

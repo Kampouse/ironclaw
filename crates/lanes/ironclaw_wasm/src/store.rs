@@ -199,12 +199,9 @@ impl bindings::near::agent::host::Host for StoreData {
             return Err(error);
         }
         let remaining_deadline_ms = self.remaining_timeout_ms(None);
-        let event_val: serde_json::Value = serde_json::from_str(&signed_event_json)
-            .unwrap_or_else(|_| serde_json::json!(signed_event_json));
-        let frame = serde_json::json!(["EVENT", event_val]);
-        let egress_bytes = serde_json::to_string(&frame)
-            .map(|s| s.len() as u64)
-            .unwrap_or(signed_event_json.len() as u64);
+        // Egress bytes: NIP-01 frame is ["EVENT",<event_json>] — overhead is ~12 bytes
+        // for the JSON array wrapper. The relay module builds the actual frame.
+        let egress_bytes = signed_event_json.len() as u64 + 12;
         self.record_network_egress(egress_bytes);
         let result = self
             .host
@@ -228,11 +225,9 @@ impl bindings::near::agent::host::Host for StoreData {
         }
         let remaining_deadline_ms = self.remaining_timeout_ms(Some(timeout_ms));
         let effective_timeout = remaining_deadline_ms.unwrap_or(timeout_ms);
-        let req_id = "wasm-subscribe";
-        let frame = serde_json::json!(["REQ", req_id, serde_json::from_str::<serde_json::Value>(&filter_json).unwrap_or_else(|_| serde_json::json!(filter_json))]);
-        let egress_bytes = serde_json::to_string(&frame)
-            .map(|s| s.len() as u64)
-            .unwrap_or(filter_json.len() as u64);
+        let _req_id = "wasm-subscribe";
+        // Egress bytes: NIP-01 REQ frame is ["REQ",<id>,<filters>...] — overhead ~20 bytes
+        let egress_bytes = filter_json.len() as u64 + 20;
         self.record_network_egress(egress_bytes);
         let result = self
             .host

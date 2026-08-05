@@ -65,7 +65,7 @@ fn hex_decode(s: &str) -> Result<Vec<u8>, ()> {
     if !s.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
         return Err(());
     }
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(());
     }
     let mut bytes = Vec::with_capacity(s.len() / 2);
