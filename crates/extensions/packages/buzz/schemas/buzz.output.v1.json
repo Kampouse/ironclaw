@@ -1,0 +1,18 @@
+{
+  "type": "object",
+  "description": "Result from a Buzz tool action",
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "description": "Nostr event ID (for send_message)."
+    },
+    "events": {
+      "type": "array",
+      "description": "List of Nostr events (for subscribe_channel)."
+    },
+    "truncated": {
+      "type": "boolean",
+      "description": "Whether the subscription was truncated (for subscribe_channel)."
+    }
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "buzz-tool",
+  "description": "Buzz messaging tool — send messages and subscribe to channels via Nostr relay.",
+  "type": "object",
+  "required": ["action"],
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": ["send_message", "subscribe_channel"],
+      "description": "The action to perform."
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "action": { "const": "send_message" } } },
+      "then": {
+        "required": ["channel_id", "content"],
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "description": "Buzz channel UUID."
+          },
+          "content": {
+            "type": "string",
+            "description": "Message content for send_message."
+          },
+          "relay_url": {
+            "type": "string",
+            "description": "WebSocket relay URL (default: wss://nearbuilders.communities.buzz.xyz)."
+          },
+          "reply_to_event_id": {
+            "type": "string",
+            "description": "Event ID to reply to (creates a thread)."
+          },
+          "mention_pubkeys": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Nostr pubkeys to mention via #p tags."
+          }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "action": { "const": "subscribe_channel" } } },
+      "then": {
+        "required": ["channel_id"],
+        "properties": {
+          "channel_id": {
+            "type": "string",
+            "description": "Buzz channel UUID."
+          },
+          "relay_url": {
+            "type": "string",
+            "description": "WebSocket relay URL (default: wss://nearbuilders.communities.buzz.xyz)."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "description": "Subscribe timeout in ms (default 5000, max 30000)."
+          },
+          "since_event_id": {
+            "type": "string",
+            "description": "Fetch events after this event ID."
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Max events to return from subscribe."
+          }
+        }
+      }
+    }
+  ]
+}

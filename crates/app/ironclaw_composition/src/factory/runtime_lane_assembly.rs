@@ -106,6 +106,16 @@ where
     F: ironclaw_filesystem::RootFilesystem + 'static,
     G: ironclaw_resources::ResourceGovernor + 'static,
 {
+    // If IRONCLAW_WASM_NOSTR_KEY is set, enable Nostr host functions.
+    if let Ok(key) = std::env::var("IRONCLAW_WASM_NOSTR_KEY") {
+        if !key.is_empty() {
+            return services
+                .try_with_default_wasm_runtime_with_nostr(&key)
+                .map_err(|error| RebornBuildError::InvalidConfig {
+                    reason: format!("WASM runtime (with nostr) could not be initialized: {error}"),
+                });
+        }
+    }
     services
         .try_with_default_wasm_runtime()
         .map_err(|error| RebornBuildError::InvalidConfig {

@@ -902,4 +902,17 @@ where
     pub fn try_with_default_wasm_runtime(self) -> Result<Self, WasmError> {
         self.try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
     }
+
+    /// Like [`Self::try_with_default_wasm_runtime`] but enables Nostr host
+    /// functions (sign, publish, subscribe) using the provided private key
+    /// (hex or nsec bech32).
+    pub fn try_with_default_wasm_runtime_with_nostr(
+        self,
+        nostr_private_key: &str,
+    ) -> Result<Self, WasmError> {
+        let nostr_host = ironclaw_wasm::ProductionWasmHostNostr::from_key_str(nostr_private_key)
+            .map_err(|e| WasmError::CompilationFailed(format!("invalid nostr key: {e}")))?;
+        let host = WitToolHost::deny_all().with_nostr(std::sync::Arc::new(nostr_host));
+        self.try_with_wasm_runtime(WitToolRuntimeConfig::default(), host)
+    }
 }
