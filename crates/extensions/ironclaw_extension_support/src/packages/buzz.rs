@@ -33,8 +33,9 @@ pub(super) fn bundle() -> PackageBundle {
         ],
         onboarding: Some(PackageOnboarding {
             instructions: "Buzz needs a Nostr private key (nsec or hex) to sign \
-                and publish messages. Set it via IRONCLAW_WASM_NOSTR_KEY env var \
-                or store it as a secret named buzz_private_key."
+                and publish messages. Store it in the IronClaw secret store \
+                under the handle \"wasm_nostr_private_key\" in the tenant-shared \
+                managed scope."
                 .to_string(),
             credential_instructions: Some(
                 "Provide your Nostr private key (nsec or hex).".to_string(),

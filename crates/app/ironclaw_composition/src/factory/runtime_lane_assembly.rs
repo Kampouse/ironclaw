@@ -1,3 +1,4 @@
+use secrecy::ExposeSecret;
 use super::*;
 
 /// The ONE construction seam for host HTTP egress.
@@ -101,13 +102,15 @@ where
 
 pub(super) fn attach_wasm_runtime<F, G>(
     services: HostRuntimeServices<F, G>,
+    nostr_key: Option<String>,
 ) -> Result<HostRuntimeServices<F, G>, RebornBuildError>
 where
     F: ironclaw_filesystem::RootFilesystem + 'static,
     G: ironclaw_resources::ResourceGovernor + 'static,
 {
-    // If IRONCLAW_WASM_NOSTR_KEY is set, enable Nostr host functions.
-    if let Ok(key) = std::env::var("IRONCLAW_WASM_NOSTR_KEY") {
+    // If a Nostr private key is available (from the secret store), enable
+    // Nostr host functions for WASM tools.
+    if let Some(key) = nostr_key {
         if !key.is_empty() {
             return services
                 .try_with_default_wasm_runtime_with_nostr(&key)
@@ -172,4 +175,43 @@ where
             services.with_production_user_sandbox_process_port(process_port)
         }
     }
+}
+
+/// Resolves the WASM Nostr private key from the secret store.
+///
+/// Looks up `wasm_nostr_private_key` in the tenant-shared managed scope
+/// (so the admin sets it once and all users inherit). Returns `None` if the
+/// secret does not exist or lease/consume fails — WASM tools that need Nostr
+/// will get deny-all behaviour.
+pub(super) async fn resolve_wasm_nostr_key(
+    secret_store: &Arc<dyn SecretStorePort>,
+    scope: &ResourceScope,
+) -> Result<Option<String>, RebornBuildError> {
+    let handle = SecretHandle::new("wasm_nostr_private_key").map_err(|error| {
+        RebornBuildError::InvalidConfig {
+            reason: format!("invalid secret handle for WASM nostr key: {error}"),
+        }
+    })?;
+    let shared_scope = scope.tenant_shared_managed_scope();
+    let exists = secret_store
+        .metadata(&shared_scope, &handle)
+        .await
+        .ok()
+        .flatten()
+        .is_some();
+    if !exists {
+        return Ok(None);
+    }
+    let lease = match secret_store.lease_once(&shared_scope, &handle).await {
+        Ok(lease) => lease,
+        Err(_) => return Ok(None),
+    };
+    let material = match secret_store
+        .consume(&shared_scope, lease.id)
+        .await
+    {
+        Ok(material) => material,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(material.expose_secret().to_string()))
 }

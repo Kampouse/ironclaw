@@ -144,7 +144,7 @@ use ironclaw_host_api::{
         RuntimeHttpEgress, RuntimeHttpEgressError, RuntimeHttpEgressRequest,
         RuntimeHttpEgressResponse,
     },
-    ids::{CorrelationId, ExtensionId, InvocationId, PackageId, UserId, VendorId},
+    ids::{CorrelationId, ExtensionId, InvocationId, PackageId, RunId, SecretHandle, UserId, VendorId},
     mount::{MountGrant, MountPermissions, MountView},
     path::{MountAlias, VirtualPath},
     resource::{ResourceEstimate, ResourceScope},

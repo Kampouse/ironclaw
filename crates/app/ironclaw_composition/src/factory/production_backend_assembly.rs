@@ -1,4 +1,4 @@
-use super::with_shared_host_runtime_wiring;
+use super::{with_shared_host_runtime_wiring, runtime_lane_assembly::resolve_wasm_nostr_key};
 use super::*;
 use ironclaw_product_contracts::lifecycle_service::LifecycleProductService;
 use ironclaw_product_contracts::operator_tools::RebornOperatorToolCatalog;
