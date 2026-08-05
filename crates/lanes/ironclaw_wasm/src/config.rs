@@ -42,4 +42,14 @@ impl WitToolRuntimeConfig {
                 .with_timeout(Duration::from_secs(5)),
         }
     }
+
+    /// Like `for_testing` but with a custom memory limit (in bytes).
+    pub fn for_testing_with_memory(memory_bytes: u64) -> Self {
+        Self {
+            default_limits: SandboxLimits::default()
+                .with_memory_bytes(memory_bytes)
+                .with_fuel(100_000)
+                .with_timeout(Duration::from_secs(5)),
+        }
+    }
 }

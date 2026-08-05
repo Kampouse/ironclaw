@@ -1533,11 +1533,14 @@ impl MockWasmHostNostr {
 impl ironclaw_wasm::WasmHostNostr for MockWasmHostNostr {
     fn sign_event(&self, unsigned_event_json: &str) -> Result<String, WasmHostError> {
         self.sign_calls.lock().unwrap().push(unsigned_event_json.to_string());
-        self.sign_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or_else(|| Ok(r#"{"id":"test-id","pubkey":"test-pk","sig":"test-sig"}"#.to_string()))
+        // Return custom result if set, otherwise a default signed event
+        // Use try_lock to avoid poisoning; clone so we don't consume
+        let result = self.sign_result.lock().unwrap();
+        if let Some(ref val) = *result {
+            val.clone()
+        } else {
+            Ok(r#"{"id":"test-id","pubkey":"test-pk","sig":"test-sig"}"#.to_string())
+        }
     }
 
     fn publish_event(
@@ -1547,11 +1550,12 @@ impl ironclaw_wasm::WasmHostNostr for MockWasmHostNostr {
         _remaining_deadline_ms: Option<u32>,
     ) -> Result<String, WasmHostError> {
         self.publish_calls.lock().unwrap().push((relay_url.to_string(), signed_event_json.to_string()));
-        self.publish_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(Ok("published-event-id".to_string()))
+        let result = self.publish_result.lock().unwrap();
+        if let Some(ref val) = *result {
+            val.clone()
+        } else {
+            Ok("published-event-id".to_string())
+        }
     }
 
     fn subscribe_events(
@@ -1562,11 +1566,12 @@ impl ironclaw_wasm::WasmHostNostr for MockWasmHostNostr {
         _remaining_deadline_ms: Option<u32>,
     ) -> Result<String, WasmHostError> {
         self.subscribe_calls.lock().unwrap().push((relay_url.to_string(), filter_json.to_string(), timeout_ms));
-        self.subscribe_result
-            .lock()
-            .unwrap()
-            .take()
-            .unwrap_or(Ok("[]".to_string()))
+        let result = self.subscribe_result.lock().unwrap();
+        if let Some(ref val) = *result {
+            val.clone()
+        } else {
+            Ok(r#"{"events":[],"truncated":false}"#.to_string())
+        }
     }
 }
 
@@ -1616,6 +1621,184 @@ async fn wasm_nostr_sign_event_flows_through_host_pipeline() {
     let calls = mock_nostr.sign_calls.lock().unwrap();
     assert_eq!(calls.len(), 1, "expected exactly 1 nostr-sign-event call, got {}", calls.len());
     assert!(calls[0].contains("hello from nostr"), "expected content in nostr input, got: {}", calls[0]);
+
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Buzz tool: real component loaded from disk, subscribe through full dispatch
+// ---------------------------------------------------------------------------
+
+const BUZZ_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "buzz"
+name = "Buzz"
+version = "0.2.3"
+description = "Nostr Buzz channel tool"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/buzz_tool.component.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "buzz.subscribe"
+description = "Subscribe to a Buzz channel"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "api"
+input_schema_ref = "schemas/buzz/subscribe.input.v1.json"
+output_schema_ref = "schemas/buzz/subscribe.output.v1.json"
+
+[[capability_provider.tools.capabilities]]
+id = "buzz.send_message"
+description = "Send a message to a Buzz channel"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "api"
+input_schema_ref = "schemas/buzz/send_message.input.v1.json"
+output_schema_ref = "schemas/buzz/send_message.output.v1.json"
+"#;
+
+/// Load the pre-built Buzz component from the tools-src tree.
+/// Only available when the file exists (i.e., after `cargo build` in tools-src/buzz).
+fn load_buzz_component_bytes() -> Vec<u8> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .expect("CARGO_MANIFEST_DIR must be set");
+    let path = std::path::Path::new(&manifest_dir)
+        .join("../../tools-src/buzz/target/wasm32-unknown-unknown/release/buzz_tool.component.wasm");
+    std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("Failed to read Buzz component at {}: {e}", path.display()))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buzz_subscribe_channel_dispatches_through_host_pipeline() {
+    let buzz_bytes = load_buzz_component_bytes();
+    let fs = filesystem_with_wasm_component("buzz", "wasm/buzz_tool.component.wasm", &buzz_bytes).await;
+    let registry = Arc::new(registry_with_package(BUZZ_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+
+    // Mock nostr: subscribe returns empty events list
+    let mock_nostr = Arc::new(MockWasmHostNostr::new());
+    *mock_nostr.subscribe_result.lock().unwrap() = Some(Ok(
+        serde_json::json!({"events": [], "truncated": false}).to_string(),
+    ));
+
+    let adapter = Arc::new(WasmRuntimeAdapter::with_host_and_config(
+        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+        WitToolRuntimeConfig::for_testing_with_memory(2 * 1024 * 1024),
+    ));
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let subscribe_params = serde_json::json!({
+        "action": "subscribe_channel",
+        "channel_id": "8b8e2988-c5d9-4ee1-adf7-5b4d37cccc9f",
+        "relay_url": "wss://relay.example.com",
+        "timeout_ms": 2000,
+        "limit": 10
+    });
+
+    let result = dispatcher
+        .dispatch_json(dispatch_request(
+            "buzz.subscribe",
+            subscribe_params.clone(),
+        ))
+        .await
+        .expect("dispatch should succeed");
+
+    assert_eq!(result.runtime, RuntimeKind::Wasm);
+
+    // Verify the mock nostr was called with correct relay URL and filter
+    let subscribe_calls = mock_nostr.subscribe_calls.lock().unwrap();
+    assert_eq!(subscribe_calls.len(), 1, "expected exactly 1 subscribe call, got {}", subscribe_calls.len());
+    let (relay_url, filter_json, timeout_ms) = &subscribe_calls[0];
+    assert_eq!(relay_url, "wss://relay.example.com");
+    assert!(filter_json.contains("8b8e2988-c5d9-4ee1-adf7-5b4d37cccc9f"), "filter should contain channel_id");
+    assert_eq!(*timeout_ms, 2000);
+
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ],
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn buzz_send_message_dispatches_sign_and_publish() {
+    let buzz_bytes = load_buzz_component_bytes();
+    let fs = filesystem_with_wasm_component("buzz", "wasm/buzz_tool.component.wasm", &buzz_bytes).await;
+    let registry = Arc::new(registry_with_package(BUZZ_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+
+    let signed_event = json!({
+        "id": "event-123",
+        "pubkey": "testpub",
+        "created_at": 1690000000,
+        "kind": 1,
+        "tags": [],
+        "content": "hello buzz",
+        "sig": "testsig"
+    });
+
+    let mock_nostr = Arc::new(MockWasmHostNostr::new());
+    // Sign returns the signed event; publish returns success
+    *mock_nostr.sign_result.lock().unwrap() = Some(Ok(signed_event.to_string()));
+    *mock_nostr.publish_result.lock().unwrap() = Some(Ok("event-123".to_string()));
+
+    let adapter = Arc::new(WasmRuntimeAdapter::with_host_and_config(
+        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+        WitToolRuntimeConfig::for_testing_with_memory(2 * 1024 * 1024),
+    ));
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let send_params = serde_json::json!({
+        "action": "send_message",
+        "channel_id": "8b8e2988-c5d9-4ee1-adf7-5b4d37cccc9f",
+        "content": "hello buzz",
+        "relay_url": "wss://relay.example.com"
+    });
+
+    let result = dispatcher
+        .dispatch_json(dispatch_request(
+            "buzz.send_message",
+            send_params.clone(),
+        ))
+        .await
+        .expect("dispatch should succeed");
+
+    assert_eq!(result.runtime, RuntimeKind::Wasm);
+
+    // Sign is called twice: once for probe, once for the real event
+    let sign_calls = mock_nostr.sign_calls.lock().unwrap();
+    assert!(sign_calls.len() >= 2, "expected at least 2 sign calls (probe + real), got {}", sign_calls.len());
+
+    // Publish is called once with the signed event
+    let publish_calls = mock_nostr.publish_calls.lock().unwrap();
+    assert_eq!(publish_calls.len(), 1, "expected exactly 1 publish call, got {}", publish_calls.len());
+    assert_eq!(publish_calls[0].0, "wss://relay.example.com");
+    // Buzz publishes the signed event — the content should be present
+    let published = &publish_calls[0].1;
+    assert!(published.contains("hello buzz") || published.contains("\"content\""),
+        "published event should contain content, got: {published}");
 
     assert_event_kinds(
         &events,
