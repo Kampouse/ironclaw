@@ -70,6 +70,30 @@ struct UnsignedEvent {
     pubkey: String,
 }
 
+/// Normalize a Nostr identifier (npub, nsec, or hex) to 64-char lowercase hex.
+/// Accepts bech32 (npub1..., nsec1...) or raw 64-char hex strings.
+fn normalize_nostr_id(id: &str) -> Result<String, String> {
+    let trimmed = id.trim();
+
+    // Try bech32 decode (npub or nsec)
+    if trimmed.starts_with("nsec1") || trimmed.starts_with("npub1") {
+        let (_hrp, data) =
+            bech32::decode(trimmed).map_err(|e| format!("bech32 decode error: {e}"))?;
+        if data.len() != 32 {
+            return Err(format!("decoded to {} bytes, expected 32", data.len()));
+        }
+        // Convert bytes to hex — this is what NIP-01 expects for tags
+        Ok(data.iter().map(|b| format!("{b:02x}")).collect())
+    } else if trimmed.len() == 64 && trimmed.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
+        // Raw hex — just lowercase it
+        Ok(trimmed.to_ascii_lowercase())
+    } else {
+        Err(format!(
+            "invalid Nostr identifier: must be npub1..., nsec1..., or 64-char hex, got: {trimmed}"
+        ))
+    }
+}
+
 fn build_send_event(
     channel_id: &str,
     content: &str,
@@ -78,22 +102,17 @@ fn build_send_event(
     pubkey: &str,
     now: u64,
 ) -> Result<UnsignedEvent, String> {
-    // Validate reply_to_event_id: must be exactly 64 hex chars if present
-    if let Some(ref reply_id) = reply_to_event_id {
-        if reply_id.len() != 64 || !reply_id.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
-            return Err(format!(
-                "reply_to_event_id must be a 64-char hex string, got: {reply_id}"
-            ));
-        }
-    }
+    // Validate and normalize reply_to_event_id
+    let reply_id_normalized = reply_to_event_id
+        .as_ref()
+        .map(|id| normalize_nostr_id(id))
+        .transpose()?
+        .map(|s| s.to_ascii_lowercase());
 
-    // Validate mention_pubkeys: each must be exactly 64 hex chars
+    // Validate and normalize mention_pubkeys
+    let mut normalized_mentions = Vec::with_capacity(mention_pubkeys.len());
     for pk in mention_pubkeys {
-        if pk.len() != 64 || !pk.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
-            return Err(format!(
-                "mention_pubkey must be a 64-char hex string, got: {pk}"
-            ));
-        }
+        normalized_mentions.push(normalize_nostr_id(pk)?.to_ascii_lowercase());
     }
 
     let mut tags = Vec::new();
@@ -102,13 +121,18 @@ fn build_send_event(
     tags.push(vec!["e".into(), channel_id.into(), "".into(), "root".into()]);
 
     // Thread reply tag
-    if let Some(ref reply_id) = reply_to_event_id {
-        tags.push(vec!["e".into(), reply_id.to_ascii_lowercase(), "".into(), "reply".into()]);
+    if let Some(ref reply_id) = reply_id_normalized {
+        tags.push(vec![
+            "e".into(),
+            reply_id.clone(),
+            "".into(),
+            "reply".into(),
+        ]);
     }
 
     // Mention tags
-    for pk in mention_pubkeys {
-        tags.push(vec!["p".into(), pk.to_ascii_lowercase()]);
+    for pk in &normalized_mentions {
+        tags.push(vec!["p".into(), pk.clone()]);
     }
 
     Ok(UnsignedEvent {
@@ -122,15 +146,13 @@ fn build_send_event(
 
 fn build_subscribe_filter(
     channel_id: &str,
-    _since_event_id: Option<&str>,
+    since_event_id: Option<&str>,
     limit: Option<u32>,
-) -> serde_json::Value {
-    // NOTE: `since_event_id` is intentionally not used here. Nostr event IDs are
-    // SHA-256 hashes (opaque identifiers), not monotonic timestamps. NIP-01 `since`
-    // filters accept a Unix timestamp, not an event ID. Converting an event ID to the
-    // corresponding creation timestamp would require either a relay query or local
-    // index lookup, neither of which is available at filter-build time.
-    // TODO: accept an optional `since_timestamp` parameter and pass it as `"since"` in the filter.
+) -> Result<serde_json::Value, String> {
+    if since_event_id.is_some() {
+        return Err("since_event_id is not supported. Use since_timestamp (Unix epoch seconds) instead.".into());
+    }
+
     let mut filter = serde_json::Map::new();
 
     // Filter by channel: NIP-01 `#e` tag
@@ -144,7 +166,8 @@ fn build_subscribe_filter(
         filter.insert("limit".into(), serde_json::json!(n));
     }
 
-    serde_json::Value::Object(filter)
+    // Host expects filter_json as Vec<serde_json::Value> (JSON array of filters)
+    Ok(serde_json::json!([filter]))
 }
 
 // ── Validation ─────────────────────────────────────────────────────────
@@ -277,7 +300,7 @@ fn handle_subscribe(
 
     let timeout = timeout_ms.unwrap_or(5000).min(30000);
 
-    let filter = build_subscribe_filter(channel_id, since_event_id, limit);
+    let filter = build_subscribe_filter(channel_id, since_event_id, limit)?;
     let filter_json =
         serde_json::to_string(&filter).map_err(|e| format!("Failed to serialize filter: {e}"))?;
 
@@ -529,14 +552,14 @@ mod tests {
     fn test_build_send_event_rejects_short_reply_id() {
         let result = build_send_event("test-uuid", "hi", &Some("short".into()), &[], "pk", 1000);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("64-char hex"));
+        assert!(result.unwrap_err().contains("invalid Nostr identifier"));
     }
 
     #[test]
     fn test_build_send_event_rejects_short_mention_pubkey() {
         let result = build_send_event("test-uuid", "hi", &None, &["not64chars".into()], "pk", 1000);
         assert!(result.is_err());
-        assert!(result.unwrap_err().contains("64-char hex"));
+        assert!(result.unwrap_err().contains("invalid Nostr identifier"));
     }
 
     #[test]
@@ -556,9 +579,19 @@ mod tests {
 
     #[test]
     fn test_build_subscribe_filter() {
-        let filter = build_subscribe_filter("ch-id", None, Some(10));
-        assert_eq!(filter["#e"][0], "ch-id");
-        assert_eq!(filter["limit"], 10);
+        let filter = build_subscribe_filter("ch-id", None, Some(10)).unwrap();
+        // Filter is now wrapped in an array for host deserialization as Vec<Value>
+        assert!(filter.is_array());
+        let inner = &filter[0];
+        assert_eq!(inner["#e"][0], "ch-id");
+        assert_eq!(inner["limit"], 10);
+    }
+
+    #[test]
+    fn test_build_subscribe_filter_rejects_since_event_id() {
+        let result = build_subscribe_filter("ch-id", Some("abc"), Some(10));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("since_event_id is not supported"));
     }
 
     #[test]
@@ -569,5 +602,38 @@ mod tests {
         assert!(validate_relay_url("ftp://relay.example.com").is_err());
         assert!(validate_relay_url("relay.example.com").is_err());
         assert!(validate_relay_url("").is_err());
+    }
+
+    #[test]
+    fn test_normalize_nostr_id_hex() {
+        assert_eq!(
+            normalize_nostr_id("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_nostr_id_uppercase_hex() {
+        assert_eq!(
+            normalize_nostr_id("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+            Ok("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string())
+        );
+    }
+
+    #[test]
+    fn test_normalize_nostr_id_npub() {
+        // npub for pubkey 79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+        let npub = "npub10xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqpkge6d";
+        let result = normalize_nostr_id(npub).unwrap();
+        assert_eq!(
+            result,
+            "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+        );
+    }
+
+    #[test]
+    fn test_normalize_nostr_id_invalid() {
+        assert!(normalize_nostr_id("not-a-key").is_err());
+        assert!(normalize_nostr_id("npub1invalid").is_err());
     }
 }

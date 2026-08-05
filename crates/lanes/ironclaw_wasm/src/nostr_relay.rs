@@ -416,6 +416,16 @@ mod tests {
     }
 
     #[test]
+    fn test_reject_hostname_resolving_to_loopback() {
+        // "localhost" always resolves to 127.0.0.1 — exercises the DNS-resolution
+        // branch of reject_ws_relay_url, not just the literal-IP path.
+        let result = reject_ws_relay_url("ws://localhost:8080");
+        assert!(result.is_err());
+        let msg = format!("{result:?}");
+        assert!(msg.contains("private"), "expected SSRF rejection for localhost, got: {msg}");
+    }
+
+    #[test]
     fn test_accept_valid_ws_url() {
         // Uses an unresolvable domain that passes scheme/structure checks.
         // DNS resolution will fail but that is not SSRF rejection.

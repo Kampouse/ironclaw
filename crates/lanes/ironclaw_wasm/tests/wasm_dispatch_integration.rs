@@ -1633,8 +1633,346 @@ async fn wasm_nostr_sign_event_flows_through_host_pipeline() {
 }
 
 // ---------------------------------------------------------------------------
-// Buzz tool: real component loaded from disk, subscribe through full dispatch
+// Nostr publish-event WAT integration test
 // ---------------------------------------------------------------------------
+
+const NOSTR_PUBLISH_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (result i64)))
+  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (type (;3;) (func (param i32 i32 i32 i32 i32)))
+  (type (;4;) (func (param i32 i32) (result i32)))
+  (type (;5;) (func (param i32 i32 i32)))
+  (type (;6;) (func (param i32 i32 i32 i32 i32)))
+  (type (;7;) (func (param i32 i32 i32 i32 i32 i32)))
+  (import "near:agent/host@0.4.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.0" "nostr-sign-event" (func $nostr_sign_event (type 5)))
+  (import "near:agent/host@0.4.0" "nostr-publish-event" (func $nostr_publish_event (type 6)))
+  (import "near:agent/host@0.4.0" "nostr-subscribe-events" (func $nostr_subscribe_events (type 7)))
+  (memory (export "memory") 1)
+  (global $count (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{\22type\22:\22object\22}")
+  (data (i32.const 2048) "nostr publish tool")
+  (data (i32.const 3072) "1")
+  (data (i32.const 4096) "wss://relay.example.com")
+  (data (i32.const 5120) "{\22id\22:\22publish-test\22,\22sig\22:\22test\22}")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 18
+    i32.store
+    i32.const 32)
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    ;; Allocate output buffer (256 bytes) for result<string, string>
+    global.get $count
+    i32.const 256
+    i32.add
+    global.set $count
+
+    ;; Call nostr-publish-event(relay_ptr, relay_len, event_ptr, event_len, out_ptr)
+    i32.const 4096          ;; relay_ptr
+    i32.const 23            ;; relay_len = len("wss://relay.example.com")
+    i32.const 5120          ;; event_ptr
+    i32.const 34            ;; event_len = len({"id":"publish-test","sig":"test"})
+    global.get $count
+    i32.const 256
+    i32.sub                ;; out_ptr
+    call $nostr_publish_event
+
+    ;; Build response: output="1", error=null
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    i32.const 3072
+    i32.store
+    i32.const 56
+    i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)
+  (func $post (param i32))
+  ;; Bump allocator: use $count as bump pointer
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    local.get $new_size
+    i32.const 7
+    i32.add
+    i32.const -8
+    i32.and          ;; align up to 8
+    local.set $new_size
+    global.get $count  ;; pre-bump value = allocation start
+    global.get $count
+    local.get $new_size
+    i32.add
+    global.set $count)
+  (func $_initialize)
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
+"#;
+
+const NOSTR_PUBLISH_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "wasm-nostr-pub-test"
+name = "WASM Nostr Publish Test"
+version = "0.1.0"
+description = "Nostr publish integration test extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/nostr_publish.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "wasm-nostr-pub-test.publish"
+description = "Publish a Nostr event through WASM"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "api"
+input_schema_ref = "schemas/wasm-nostr-pub-test/publish.input.v1.json"
+output_schema_ref = "schemas/wasm-nostr-pub-test/publish.output.v1.json"
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_nostr_publish_event_flows_through_host_pipeline() {
+    let component = tool_component(NOSTR_PUBLISH_TOOL_WAT);
+    let fs = filesystem_with_wasm_component("wasm-nostr-pub-test", "wasm/nostr_publish.wasm", &component).await;
+    let registry = Arc::new(registry_with_package(NOSTR_PUBLISH_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+
+    let mock_nostr = Arc::new(MockWasmHostNostr::new());
+    let adapter = Arc::new(WasmRuntimeAdapter::with_host(
+        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+    ));
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let result = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-nostr-pub-test.publish",
+            json!({}),
+        ))
+        .await
+        .expect("dispatch should succeed");
+
+    assert_eq!(result.runtime, RuntimeKind::Wasm);
+
+    let calls = mock_nostr.publish_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "expected exactly 1 nostr-publish-event call, got {}", calls.len());
+    assert_eq!(calls[0].0, "wss://relay.example.com", "relay URL mismatch");
+    assert!(calls[0].1.contains("publish-test"), "expected publish-test in event JSON, got: {}", calls[0].1);
+
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Nostr subscribe-events WAT integration test
+// ---------------------------------------------------------------------------
+
+const NOSTR_SUBSCRIBE_TOOL_WAT: &str = r#"
+(module
+  (type (;0;) (func (param i32 i32 i32)))
+  (type (;1;) (func (result i64)))
+  (type (;2;) (func (param i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32 i32)))
+  (type (;3;) (func (param i32 i32 i32 i32 i32)))
+  (type (;4;) (func (param i32 i32) (result i32)))
+  (type (;5;) (func (param i32 i32 i32)))
+  (type (;6;) (func (param i32 i32 i32 i32 i32)))
+  (type (;7;) (func (param i32 i32 i32 i32 i32 i32)))
+  (import "near:agent/host@0.4.0" "log" (func $log (type 0)))
+  (import "near:agent/host@0.4.0" "now-millis" (func $now (type 1)))
+  (import "near:agent/host@0.4.0" "workspace-read" (func $workspace_read (type 0)))
+  (import "near:agent/host@0.4.0" "http-request" (func $http_request (type 2)))
+  (import "near:agent/host@0.4.0" "tool-invoke" (func $tool_invoke (type 3)))
+  (import "near:agent/host@0.4.0" "secret-exists" (func $secret_exists (type 4)))
+  (import "near:agent/host@0.4.0" "nostr-sign-event" (func $nostr_sign_event (type 5)))
+  (import "near:agent/host@0.4.0" "nostr-publish-event" (func $nostr_publish_event (type 6)))
+  (import "near:agent/host@0.4.0" "nostr-subscribe-events" (func $nostr_subscribe_events (type 7)))
+  (memory (export "memory") 1)
+  (global $count (mut i32) (i32.const 0))
+  (data (i32.const 1024) "{\22type\22:\22object\22}")
+  (data (i32.const 2048) "nostr subscribe tool")
+  (data (i32.const 3072) "1")
+  (data (i32.const 4096) "wss://relay.example.com")
+  (data (i32.const 5120) "{\22kinds\22:[1]}")
+  (func $schema (result i32)
+    i32.const 16
+    i32.const 1024
+    i32.store
+    i32.const 20
+    i32.const 17
+    i32.store
+    i32.const 16)
+  (func $description (result i32)
+    i32.const 32
+    i32.const 2048
+    i32.store
+    i32.const 36
+    i32.const 20
+    i32.store
+    i32.const 32)
+  (func $execute (param i32 i32 i32 i32 i32) (result i32)
+    ;; Allocate output buffer (256 bytes) for result<string, string>
+    global.get $count
+    i32.const 256
+    i32.add
+    global.set $count
+
+    ;; Call nostr-subscribe-events(relay_ptr, relay_len, filter_ptr, filter_len, timeout_ms, out_ptr)
+    i32.const 4096          ;; relay_ptr
+    i32.const 23            ;; relay_len = len("wss://relay.example.com")
+    i32.const 5120          ;; filter_ptr
+    i32.const 13            ;; filter_len = len({"kinds":[1]})
+    i32.const 3000          ;; timeout_ms
+    global.get $count
+    i32.const 256
+    i32.sub                ;; out_ptr
+    call $nostr_subscribe_events
+
+    ;; Build response: output="1", error=null
+    i32.const 48
+    i32.const 1
+    i32.store
+    i32.const 52
+    i32.const 3072
+    i32.store
+    i32.const 56
+    i32.const 1
+    i32.store
+    i32.const 60
+    i32.const 0
+    i32.store
+    i32.const 48)
+  (func $post (param i32))
+  ;; Bump allocator: use $count as bump pointer
+  (func $realloc (param $old i32) (param $old_align i32) (param $new_size i32) (param $new_align i32) (result i32)
+    local.get $new_size
+    i32.const 7
+    i32.add
+    i32.const -8
+    i32.and          ;; align up to 8
+    local.set $new_size
+    global.get $count  ;; pre-bump value = allocation start
+    global.get $count
+    local.get $new_size
+    i32.add
+    global.set $count)
+  (func $_initialize)
+  (export "near:agent/tool@0.4.0#execute" (func $execute))
+  (export "cabi_post_near:agent/tool@0.4.0#execute" (func $post))
+  (export "near:agent/tool@0.4.0#schema" (func $schema))
+  (export "cabi_post_near:agent/tool@0.4.0#schema" (func $post))
+  (export "near:agent/tool@0.4.0#description" (func $description))
+  (export "cabi_post_near:agent/tool@0.4.0#description" (func $post))
+  (export "cabi_realloc" (func $realloc))
+  (export "_initialize" (func $_initialize))
+)
+"#;
+
+const NOSTR_SUBSCRIBE_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
+id = "wasm-nostr-sub-test"
+name = "WASM Nostr Subscribe Test"
+version = "0.1.0"
+description = "Nostr subscribe integration test extension"
+trust = "untrusted"
+
+[runtime]
+kind = "wasm"
+module = "wasm/nostr_subscribe.wasm"
+
+[[host_api]]
+id = "ironclaw.capability_provider/v1"
+section = "capability_provider.tools"
+
+[capability_provider.tools]
+
+[[capability_provider.tools.capabilities]]
+id = "wasm-nostr-sub-test.subscribe"
+description = "Subscribe to Nostr events through WASM"
+effects = ["dispatch_capability"]
+default_permission = "allow"
+visibility = "api"
+input_schema_ref = "schemas/wasm-nostr-sub-test/subscribe.input.v1.json"
+output_schema_ref = "schemas/wasm-nostr-sub-test/subscribe.output.v1.json"
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wasm_nostr_subscribe_events_flows_through_host_pipeline() {
+    let component = tool_component(NOSTR_SUBSCRIBE_TOOL_WAT);
+    let fs = filesystem_with_wasm_component("wasm-nostr-sub-test", "wasm/nostr_subscribe.wasm", &component).await;
+    let registry = Arc::new(registry_with_package(NOSTR_SUBSCRIBE_MANIFEST));
+    let governor = Arc::new(governor_with_default_limit(sample_account()));
+    let events = InMemoryEventSink::new();
+
+    let mock_nostr = Arc::new(MockWasmHostNostr::new());
+    let adapter = Arc::new(WasmRuntimeAdapter::with_host(
+        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+    ));
+    let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
+        .with_event_sink_arc(Arc::new(events.clone()));
+
+    let result = dispatcher
+        .dispatch_json(dispatch_request(
+            "wasm-nostr-sub-test.subscribe",
+            json!({}),
+        ))
+        .await
+        .expect("dispatch should succeed");
+
+    assert_eq!(result.runtime, RuntimeKind::Wasm);
+
+    let calls = mock_nostr.subscribe_calls.lock().unwrap();
+    assert_eq!(calls.len(), 1, "expected exactly 1 nostr-subscribe-events call, got {}", calls.len());
+    assert_eq!(calls[0].0, "wss://relay.example.com", "relay URL mismatch");
+    assert!(calls[0].1.contains("kinds"), "expected filter to contain kinds, got: {}", calls[0].1);
+    assert_eq!(calls[0].2, 3000, "timeout_ms mismatch");
+
+    assert_event_kinds(
+        &events,
+        &[
+            RuntimeEventKind::DispatchRequested,
+            RuntimeEventKind::RuntimeSelected,
+            RuntimeEventKind::DispatchSucceeded,
+        ],
+    );
+}
 
 const BUZZ_MANIFEST: &str = r#"schema_version = "reborn.extension_manifest.v2"
 id = "buzz"

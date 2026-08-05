@@ -81,121 +81,28 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Minimal bech32 decode for nsec keys (no external dependency).
-/// nsec uses bech32 with HRP "nsec", converts 5-bit groups to 8-bit bytes.
+/// Decode an nsec bech32 string to 32 raw bytes.
 fn decode_nsec_bech32(bech32_str: &str) -> Result<[u8; 32], NostrSignError> {
-    // Bech32 charset (lowercase)
-    const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    let (hrp, data) = bech32::decode(bech32_str)
+        .map_err(|e| NostrSignError::InvalidKey(format!("bech32 decode error: {e}")))?;
 
-    let pos = bech32_str.rfind('1').ok_or_else(|| {
-        NostrSignError::InvalidKey("bech32: missing separator '1'".to_string())
-    })?;
-
-    // Extract HRP (everything before last '1') — keep original case for checksum
-    let hrp = &bech32_str[..pos];
-    let data_part = &bech32_str[pos + 1..];
-    let data_part_upper = data_part.to_uppercase();
-
-    // Verify minimum length: 6-char checksum + at least 1 data char
-    if data_part_upper.len() < 6 {
-        return Err(NostrSignError::InvalidKey(
-            "bech32: data part too short".to_string(),
-        ));
-    }
-
-    let data_len = data_part_upper.len() - 6;
-    let data_part_without_checksum = &data_part_upper[..data_len];
-    // SAFETY: Byte slicing on a String is safe here because `data_part_upper` has
-    // been `.to_uppercase()`-d from `data_part`, and all characters in the bech32
-    // data part are guaranteed to be ASCII (validated below against CHARSET, which
-    // contains only ASCII bytes). Therefore byte offsets equal char offsets.
-
-    // Verify HRP (case-insensitive comparison)
-    if hrp.to_lowercase() != "nsec" {
+    if hrp.to_string() != "nsec" {
         return Err(NostrSignError::InvalidKey(format!(
             "bech32: expected HRP 'nsec', got '{}'",
             hrp
         )));
     }
 
-    // Expand HRP (case-sensitive for checksum verification)
-    let mut expanded = Vec::with_capacity(hrp.len() * 2 + 7);
-    for c in hrp.chars() {
-        expanded.push((c as u8) >> 5);
-    }
-    expanded.push(0u8);
-    for c in hrp.chars() {
-        expanded.push((c as u8) & 31);
-    }
-
-    // Decode data characters to 5-bit values
-    for c in data_part_upper.chars() {
-        let byte = c as u8;
-        let idx = CHARSET.iter().position(|&ch| ch == byte.to_ascii_lowercase())
-            .ok_or_else(|| {
-                NostrSignError::InvalidKey(format!("bech32: invalid character '{c}'"))
-            })?;
-        expanded.push(idx as u8);
-    }
-
-    // Verify checksum (bech32 checksum constant = 1)
-    let checksum = bech32_polymod(&expanded);
-    if checksum != 1 {
-        return Err(NostrSignError::InvalidKey(
-            "bech32: invalid checksum".to_string(),
-        ));
-    }
-
-    // Convert 5-bit groups to 8-bit bytes
-    let mut five_bit: Vec<u8> = Vec::with_capacity(data_len);
-    for c in data_part_without_checksum.chars() {
-        let byte = c as u8;
-        let idx = CHARSET.iter().position(|&ch| ch == byte.to_ascii_lowercase())
-            .ok_or_else(|| {
-                NostrSignError::InvalidKey(format!("bech32: invalid data character '{c}'"))
-            })?;
-        five_bit.push(idx as u8);
-    }
-
-    // 5-bit → 8-bit conversion
-    let mut bytes = Vec::new();
-    let mut buffer: u64 = 0;
-    let mut bits = 0u32;
-    for &val in &five_bit {
-        buffer = (buffer << 5) | (val as u64);
-        bits += 5;
-        while bits >= 8 {
-            bits -= 8;
-            bytes.push((buffer >> bits) as u8);
-        }
-    }
-
-    if bytes.len() != 32 {
+    if data.len() != 32 {
         return Err(NostrSignError::InvalidKey(format!(
             "nsec decoded to {} bytes, expected 32",
-            bytes.len()
+            data.len()
         )));
     }
 
     let mut arr = [0u8; 32];
-    arr.copy_from_slice(&bytes);
+    arr.copy_from_slice(&data);
     Ok(arr)
-}
-
-/// Bech32 checksum polynomial.
-fn bech32_polymod(values: &[u8]) -> u32 {
-    const GENERATORS: [u32; 5] = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
-    let mut chk: u32 = 1;
-    for &v in values {
-        let top = (chk >> 25) as u8;
-        chk = (chk & 0x1ffffff) << 5 ^ v as u32;
-        for i in 0..5 {
-            if (top >> i) & 1 == 1 {
-                chk ^= GENERATORS[i];
-            }
-        }
-    }
-    chk
 }
 
 /// Sign an unsigned Nostr event with a private key.
@@ -332,6 +239,12 @@ mod tests {
     }
 
     #[test]
+    fn test_hex_decode_rejects_non_ascii() {
+        // é is a multi-byte UTF-8 character that passes a naive length check
+        assert!(hex_decode("a\u{e9}1").is_err());
+    }
+
+    #[test]
     fn test_reject_non_ascii_hex_input() {
         // "aé1" has even byte length but contains non-ASCII é (U+00E9)
         assert!(hex_decode("a\u{e9}1").is_err());
@@ -359,9 +272,8 @@ mod tests {
     #[test]
     fn test_sign_simple_event() {
         let privkey = make_test_privkey();
-        let pubkey = "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
 
-        let unsigned = format!(r#"{{"pubkey": "{}", "created_at": 1690000000, "kind": 1, "tags": [], "content": "hello from nostr"}}"#, pubkey);
+        let unsigned = r#"{"pubkey": "79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798", "created_at": 1690000000, "kind": 1, "tags": [], "content": "hello from nostr"}"#;
 
         let result = sign_nostr_event(&unsigned, &privkey).expect("signing failed");
         let event: serde_json::Value = serde_json::from_str(&result).unwrap();

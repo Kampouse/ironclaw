@@ -227,6 +227,7 @@ impl bindings::near::agent::host::Host for StoreData {
             return Err(error);
         }
         let remaining_deadline_ms = self.remaining_timeout_ms(Some(timeout_ms));
+        let effective_timeout = remaining_deadline_ms.unwrap_or(timeout_ms);
         let req_id = "wasm-subscribe";
         let frame = serde_json::json!(["REQ", req_id, serde_json::from_str::<serde_json::Value>(&filter_json).unwrap_or_else(|_| serde_json::json!(filter_json))]);
         let egress_bytes = serde_json::to_string(&frame)
@@ -236,7 +237,7 @@ impl bindings::near::agent::host::Host for StoreData {
         let result = self
             .host
             .nostr
-            .subscribe_events(&relay_url, &filter_json, timeout_ms, remaining_deadline_ms)
+            .subscribe_events(&relay_url, &filter_json, effective_timeout, remaining_deadline_ms)
             .map_err(|error| error.to_string());
         if let Some(error) = self.deadline_error() {
             return Err(error);
