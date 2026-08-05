@@ -43,6 +43,8 @@ test-support = [
 # ACP (Agent Client Protocol) stdio transport for IDE/CLI agent integration.
 agent-client-protocol = "0.10"
 anyhow = "1"
+# Needed for ACP stdio compat (futures-io AsyncWrite trait).
+futures-io = "0.3"
 async-trait = { version = "0.1" }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
