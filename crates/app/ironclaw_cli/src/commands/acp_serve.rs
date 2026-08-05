@@ -6,23 +6,28 @@
 //! ## Architecture
 //!
 //! Unlike the HTTP `serve` command (WebChat), this command:
-//! - Uses `current_thread` tokio runtime (ACP stdio is !Send)
-//! - Implements the `agent_client_protocol::Agent` trait
+//! - Implements the `agent_client_protocol::Agent` trait on stdio
 //! - Bridges each ACP `prompt()` call to `RebornRuntime::send_user_message()`
 //! - Returns the assistant reply text in the `PromptResponse`
+//!
+//! The runtime boots identically to the `run` command (multi_thread tokio).
+//! ACP I/O runs on a `LocalSet` inside the multi_thread runtime so the
+//! !Send `Agent` trait impl works.
 
 use std::sync::Arc;
 
+use std::pin::Pin;
+
 use agent_client_protocol::{
     Agent, AgentSideConnection, AgentCapabilities, AuthenticateRequest, AuthenticateResponse,
-    ContentBlock, Error, Implementation, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse, ProtocolVersion,
-    SessionId, StopReason,
+    Client, ContentBlock, ContentChunk, Error, Implementation, InitializeRequest,
+    InitializeResponse, NewSessionRequest, NewSessionResponse, PromptRequest, PromptResponse,
+    ProtocolVersion, SessionId, SessionNotification, SessionUpdate, StopReason,
 };
 use clap::Args;
 use ironclaw_reborn_composition::{RebornRuntime, build_reborn_runtime};
-use tokio::sync::Notify;
 use tokio_util::compat::TokioAsyncReadCompatExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::context::RebornCliContext;
 use crate::runtime::{
@@ -46,7 +51,18 @@ pub(crate) struct AcpServeCommand {
 
 struct RebornAcpAgent {
     runtime: Arc<RebornRuntime>,
-    cancel_notify: Arc<Notify>,
+    conn: Arc<std::sync::Mutex<Option<AgentSideConnection>>>,
+    cancel_token: CancellationToken,
+}
+
+impl Clone for RebornAcpAgent {
+    fn clone(&self) -> Self {
+        Self {
+            runtime: self.runtime.clone(),
+            conn: self.conn.clone(),
+            cancel_token: self.cancel_token.clone(),
+        }
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -95,9 +111,8 @@ impl Agent for RebornAcpAgent {
             return Err(Error::invalid_params());
         }
 
-        // Create a new conversation for each ACP session prompt.
-        // ACP sessions are stateless from our side — each prompt is a
-        // standalone interaction matching the REPL pattern.
+        // Each ACP prompt creates a fresh conversation — ACP sessions are
+        // stateless from our side.
         let conversation = self
             .runtime
             .new_conversation()
@@ -106,20 +121,30 @@ impl Agent for RebornAcpAgent {
 
         let reply = self
             .runtime
-            .send_user_message(&conversation, &content)
+            .send_user_message_with_cancellation(&conversation, &content, self.cancel_token.clone())
             .await
             .map_err(|e| Error::new(-32603, format!("Agent run failed: {e}")))?;
-
-        // TODO: support streaming mid-turn chunks via trajectory observer
-        // and session notifications.
 
         let stop_reason = if reply.is_successful_final_reply() {
             StopReason::EndTurn
         } else {
-            // ACP 0.10 has no Error stop reason — use MaxTurnRequests as
-            // the closest "did not complete normally" signal.
             StopReason::MaxTurnRequests
         };
+
+        // Stream the assistant reply text back as an AgentMessageChunk
+        // notification so the client receives the content.
+        if let Some(text) = &reply.text {
+            if let Some(conn) = self.conn.lock().unwrap().as_ref() {
+                let _ = conn.session_notification(
+                    SessionNotification::new(
+                        args.session_id,
+                        SessionUpdate::AgentMessageChunk(
+                            ContentChunk::new(ContentBlock::from(text.as_str())),
+                        ),
+                    ),
+                ).await;
+            }
+        }
 
         Ok(PromptResponse::new(stop_reason))
     }
@@ -128,12 +153,59 @@ impl Agent for RebornAcpAgent {
         &self,
         _args: agent_client_protocol::CancelNotification,
     ) -> std::result::Result<(), Error> {
-        self.cancel_notify.notify_waiters();
+        self.cancel_token.cancel();
         Ok(())
     }
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────
+
+/// Wrapper that flushes stdout after every `write` call.
+/// The ACP library writes JSON-RPC lines but never calls `flush()`, so
+/// piped stdout would never deliver the response.
+struct FlushingWrite<W> {
+    inner: W,
+}
+
+impl<W> FlushingWrite<W> {
+    fn new(inner: W) -> Self {
+        Self { inner }
+    }
+}
+
+impl<W: futures_io::AsyncWrite> futures_io::AsyncWrite for FlushingWrite<W> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        // SAFETY: FlushingWrite is a repr-transparent wrapper over `inner`.
+        // We never move `inner` and the struct has no Drop, so projecting
+        // the pin is sound (pin-project pattern).
+        let me = unsafe { self.get_unchecked_mut() };
+        let result = unsafe { Pin::new_unchecked(&mut me.inner) }.poll_write(cx, buf);
+        if result.is_ready() {
+            let _ = unsafe { Pin::new_unchecked(&mut me.inner) }.poll_flush(cx);
+        }
+        result
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let me = unsafe { self.get_unchecked_mut() };
+        unsafe { Pin::new_unchecked(&mut me.inner) }.poll_flush(cx)
+    }
+
+    fn poll_close(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let me = unsafe { self.get_unchecked_mut() };
+        unsafe { Pin::new_unchecked(&mut me.inner) }.poll_close(cx)
+    }
+}
 
 impl AcpServeCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
@@ -148,45 +220,57 @@ impl AcpServeCommand {
         crate::runtime::init_tracing();
         let boot_config = context.boot_config().clone();
 
-        // ACP stdio requires current_thread runtime because the Agent trait
-        // is !Send (uses LocalSet for spawn_local).
-        let rt = tokio::runtime::Builder::new_current_thread()
+        // Sync setup — same as `run` command.
+        let runtime_input =
+            build_runtime_input_with_options(&boot_config, RuntimeInputCaller::AcpServe, RuntimeInputOptions::default())?
+                .inner;
+
+        // Multi-thread runtime — `build_reborn_runtime` spawns internal tasks
+        // that deadlock on single-thread (confirmed by testing).
+        let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()?;
 
         rt.block_on(async move {
-            let built = build_runtime_input_with_options(
-                &boot_config,
-                RuntimeInputCaller::AcpServe,
-                RuntimeInputOptions::default(),
-            )?;
-
-            let runtime = build_reborn_runtime(built.inner).await?;
+            eprintln!("[ACP] building reborn runtime...");
+            let runtime = build_reborn_runtime(runtime_input).await?;
+            eprintln!("[ACP] reborn runtime built, starting ACP I/O");
             let runtime = Arc::new(runtime);
-
-            let cancel_notify = Arc::new(Notify::new());
+            let conn_slot: Arc<std::sync::Mutex<Option<AgentSideConnection>>> =
+                Arc::new(std::sync::Mutex::new(None));
             let agent = RebornAcpAgent {
-                runtime,
-                cancel_notify,
+                runtime: runtime.clone(),
+                conn: conn_slot.clone(),
+                cancel_token: CancellationToken::new(),
             };
 
+            // ACP I/O must run inside a LocalSet because the Agent trait is
+            // !Send (ACP crate uses `spawn_local` internally).
             let local_set = tokio::task::LocalSet::new();
             local_set
                 .run_until(async {
                     let stdin = tokio::io::stdin();
                     let stdout = tokio::io::stdout();
-                    let (_conn, io_task) = AgentSideConnection::new(
-                        agent,
-                        tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(stdout),
+                    // Wrap stdout in compat (tokio → futures-io), then in
+                    // FlushingWrite to auto-flush after each write (the ACP
+                    // library writes lines but never calls flush()).
+                    let (conn, io_task) = AgentSideConnection::new(
+                        agent.clone(),
+                        FlushingWrite::new(
+                            tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(stdout),
+                        ),
                         TokioAsyncReadCompatExt::compat(stdin),
                         |fut| {
                             tokio::task::spawn_local(fut);
                         },
                     );
-
-                    io_task
-                        .await
-                        .map_err(|e| anyhow::anyhow!("ACP I/O error: {e}"))?;
+                    *conn_slot.lock().unwrap() = Some(conn);
+                    // Spawn the I/O task on the LocalSet so that both the
+                    // I/O reader and the message handler (spawned inside
+                    // via the callback) are driven concurrently.
+                    let handle = tokio::task::spawn_local(io_task);
+                    // Block until stdin closes (EOF), which ends the session.
+                    let _ = handle.await;
                     Ok::<(), anyhow::Error>(())
                 })
                 .await?;

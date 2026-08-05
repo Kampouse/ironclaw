@@ -3503,6 +3503,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "dotenvy",
+ "futures-io",
  "hex",
  "ironclaw_auth",
  "ironclaw_common",
