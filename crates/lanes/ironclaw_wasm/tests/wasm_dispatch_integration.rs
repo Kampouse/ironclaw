@@ -1673,19 +1673,27 @@ output_schema_ref = "schemas/buzz/send_message.output.v1.json"
 "#;
 
 /// Load the pre-built Buzz component from the tools-src tree.
-/// Only available when the file exists (i.e., after `cargo build` in tools-src/buzz).
-fn load_buzz_component_bytes() -> Vec<u8> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR must be set");
+/// Only available after `cargo build --release --target wasm32-unknown-unknown` in
+/// `tools-src/buzz`. Tests that depend on it are gated by a file-existence check so
+/// they pass on fresh checkouts without the build artifact.
+fn buzz_component_path() -> Option<std::path::PathBuf> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
     let path = std::path::Path::new(&manifest_dir)
         .join("../../tools-src/buzz/target/wasm32-unknown-unknown/release/buzz_tool.component.wasm");
-    std::fs::read(&path)
-        .unwrap_or_else(|e| panic!("Failed to read Buzz component at {}: {e}", path.display()))
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn buzz_subscribe_channel_dispatches_through_host_pipeline() {
-    let buzz_bytes = load_buzz_component_bytes();
+    let Some(buzz_path) = buzz_component_path() else {
+        eprintln!("Skipping: Buzz component not found. Build with: cargo build --release --target wasm32-unknown-unknown -p buzz-tool (in tools-src/buzz)");
+        return;
+    };
+    let buzz_bytes = std::fs::read(&buzz_path).unwrap();
     let fs = filesystem_with_wasm_component("buzz", "wasm/buzz_tool.component.wasm", &buzz_bytes).await;
     let registry = Arc::new(registry_with_package(BUZZ_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
@@ -1742,7 +1750,11 @@ async fn buzz_subscribe_channel_dispatches_through_host_pipeline() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn buzz_send_message_dispatches_sign_and_publish() {
-    let buzz_bytes = load_buzz_component_bytes();
+    let Some(buzz_path) = buzz_component_path() else {
+        eprintln!("Skipping: Buzz component not found. Build with: cargo build --release --target wasm32-unknown-unknown -p buzz-tool (in tools-src/buzz)");
+        return;
+    };
+    let buzz_bytes = std::fs::read(&buzz_path).unwrap();
     let fs = filesystem_with_wasm_component("buzz", "wasm/buzz_tool.component.wasm", &buzz_bytes).await;
     let registry = Arc::new(registry_with_package(BUZZ_MANIFEST));
     let governor = Arc::new(governor_with_default_limit(sample_account()));
@@ -1787,9 +1799,9 @@ async fn buzz_send_message_dispatches_sign_and_publish() {
 
     assert_eq!(result.runtime, RuntimeKind::Wasm);
 
-    // Sign is called twice: once for probe, once for the real event
+    // Buzz signs twice per send: once to probe host availability, once for the real event.
     let sign_calls = mock_nostr.sign_calls.lock().unwrap();
-    assert!(sign_calls.len() >= 2, "expected at least 2 sign calls (probe + real), got {}", sign_calls.len());
+    assert_eq!(sign_calls.len(), 2, "expected exactly 2 sign calls (probe + real), got {:?}", sign_calls);
 
     // Publish is called once with the signed event
     let publish_calls = mock_nostr.publish_calls.lock().unwrap();
