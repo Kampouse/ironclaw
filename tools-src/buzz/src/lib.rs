@@ -566,5 +566,8 @@ mod tests {
         assert!(validate_relay_url("wss://relay.example.com").is_ok());
         assert!(validate_relay_url("ws://localhost:3000").is_ok());
         assert!(validate_relay_url("https://example.com").is_err());
+        assert!(validate_relay_url("ftp://relay.example.com").is_err());
+        assert!(validate_relay_url("relay.example.com").is_err());
+        assert!(validate_relay_url("").is_err());
     }
 }

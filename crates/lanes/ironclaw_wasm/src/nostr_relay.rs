@@ -36,6 +36,12 @@ impl From<NostrRelayError> for WasmHostError {
 
 /// Maximum number of events collected per subscription to prevent unbounded memory.
 const MAX_COLLECTED_EVENTS: usize = 5_000;
+/// Maximum cumulative bytes of collected event JSON before truncation.
+/// Prevents memory exhaustion from relay-controlled large payloads.
+const MAX_COLLECTED_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
+/// Maximum size of a single incoming WebSocket message (bytes).
+/// Default tungstenite limit is 64 MiB; we lower to 1 MiB for WASM sandbox.
+const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MiB
 
 /// Default connect timeout in milliseconds.
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
@@ -165,7 +171,15 @@ pub async fn publish_nostr_event(
     );
 
     let (ws_stream, _) = tokio::time::timeout(connect_timeout, async {
-        tokio_tungstenite::connect_async(relay_url).await
+        tokio_tungstenite::connect_async_with_config(
+            relay_url,
+            Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+                max_message_size: Some(MAX_WS_MESSAGE_SIZE),
+                ..Default::default()
+            }),
+            false,
+        )
+        .await
     })
     .await
     .map_err(|_| {
@@ -278,7 +292,15 @@ pub async fn subscribe_nostr_events(
     );
 
     let (ws_stream, _) = tokio::time::timeout(connect_timeout, async {
-        tokio_tungstenite::connect_async(relay_url).await
+        tokio_tungstenite::connect_async_with_config(
+            relay_url,
+            Some(tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+                max_message_size: Some(MAX_WS_MESSAGE_SIZE),
+                ..Default::default()
+            }),
+            false,
+        )
+        .await
     })
     .await
     .map_err(|_| {
@@ -320,6 +342,7 @@ pub async fn subscribe_nostr_events(
     let mut events: Vec<serde_json::Value> = Vec::new();
     let mut truncated = false;
     let mut read_error: Option<String> = None;
+    let mut collected_bytes: usize = 0;
 
     let _ = tokio::time::timeout(
         std::time::Duration::from_millis(collection_timeout),
@@ -336,8 +359,11 @@ pub async fn subscribe_nostr_events(
                     if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&text) {
                         if arr.len() >= 3 && arr[0] == "EVENT" {
                             // arr[1] is sub_id, arr[2] is the event
+                            collected_bytes = collected_bytes.saturating_add(text.len());
                             events.push(arr[2].clone());
-                            if events.len() >= MAX_COLLECTED_EVENTS {
+                            if events.len() >= MAX_COLLECTED_EVENTS
+                                || collected_bytes >= MAX_COLLECTED_BYTES
+                            {
                                 truncated = true;
                                 break;
                             }
