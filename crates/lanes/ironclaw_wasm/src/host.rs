@@ -704,6 +704,93 @@ impl WasmHostNostr for DenyWasmHostNostr {
     }
 }
 
+/// Production Nostr host service that holds the private key and delegates
+/// relay I/O to the async relay module via a shared tokio runtime.
+///
+/// The host resolves the private key once at construction (hex or nsec) and
+/// reuses it for all signing operations within this scope. Relay I/O is
+/// spawned on the WASM HTTP egress runtime so the synchronous `WasmHostNostr`
+/// trait methods don't block the caller.
+#[derive(Clone)]
+pub struct ProductionWasmHostNostr {
+    private_key_bytes: [u8; 32],
+}
+
+impl std::fmt::Debug for ProductionWasmHostNostr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProductionWasmHostNostr")
+            .field("private_key_bytes", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl ProductionWasmHostNostr {
+    /// Build a production Nostr host from a hex or nsec private key.
+    ///
+    /// The key is decoded and validated immediately; invalid keys return an
+    /// error here rather than on first use.
+    pub fn new(private_key: &str) -> Result<Self, WasmHostError> {
+        let private_key_bytes = crate::nostr_signer::decode_nostr_private_key(private_key)?;
+        Ok(Self {
+            private_key_bytes,
+        })
+    }
+
+    /// Run an async future on the dedicated WASM egress runtime.
+    fn block_on_async<F, T>(future: F) -> Result<T, WasmHostError>
+    where
+        F: std::future::Future<Output = Result<T, WasmHostError>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let runtime = WASM_HTTP_EGRESS_RUNTIME
+            .as_ref()
+            .map_err(|e| e.clone())?;
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(future)
+        }));
+        match result {
+            Ok(inner) => inner,
+            Err(_) => Err(WasmHostError::Failed(
+                "WASM Nostr relay task panicked".to_string(),
+            )),
+        }
+    }
+}
+
+impl WasmHostNostr for ProductionWasmHostNostr {
+    fn sign_event(&self, unsigned_event_json: &str) -> Result<String, WasmHostError> {
+        crate::nostr_signer::sign_nostr_event(unsigned_event_json, &self.private_key_bytes)
+            .map_err(WasmHostError::from)
+    }
+
+    fn publish_event(
+        &self,
+        relay_url: &str,
+        signed_event_json: &str,
+        remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
+        let url = relay_url.to_owned();
+        let event = signed_event_json.to_owned();
+        Self::block_on_async(async move {
+            crate::nostr_relay::publish_nostr_event(&url, &event, remaining_deadline_ms).await
+        })
+    }
+
+    fn subscribe_events(
+        &self,
+        relay_url: &str,
+        filter_json: &str,
+        timeout_ms: u32,
+        remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
+        let url = relay_url.to_owned();
+        let filter = filter_json.to_owned();
+        Self::block_on_async(async move {
+            crate::nostr_relay::subscribe_nostr_events(&url, &filter, timeout_ms, remaining_deadline_ms).await
+        })
+    }
+}
+
 /// Host services made available to one WASM tool execution.
 ///
 /// ## Per-capability wiring
@@ -790,10 +877,7 @@ impl WitToolHost {
         self
     }
 
-    pub fn with_nostr<T>(mut self, nostr: Arc<T>) -> Self
-    where
-        T: WasmHostNostr + 'static,
-    {
+    pub fn with_nostr(mut self, nostr: Arc<dyn WasmHostNostr>) -> Self {
         self.nostr = nostr;
         self
     }

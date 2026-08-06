@@ -30,7 +30,8 @@ use super::{
     ResourceReservationId, ResourceScope, RootFilesystem, RuntimeAdapterResult,
     RuntimeDispatchErrorKind, RuntimeKind, RuntimeLane, ScriptError, ScriptExecutionRequest,
     ScriptExecutor, ScriptInvocation, SharedRuntimeHttpEgress, WasmError,
-    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder, WitToolHost,
+    WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter, WasmRuntimePolicyDiscarder,
+    DenyWasmHostNostr, WasmHostNostr, WitToolHost,
     WitToolRuntime, WitToolRuntimeConfig, plan_capability, runtime_http_egress,
 };
 use crate::obligations::RuntimeSecretInjectionStore;
@@ -905,6 +906,7 @@ pub(super) struct WasmRuntimeAdapter {
     runtime_http_egress: SharedRuntimeHttpEgress,
     credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
     secret_injections: Arc<RuntimeSecretInjectionStore>,
+    nostr_host: Option<Arc<dyn WasmHostNostr>>,
     prepared: Mutex<HashMap<String, Arc<PreparedWitTool>>>,
 }
 
@@ -916,6 +918,7 @@ impl WasmRuntimeAdapter {
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
+        nostr_host: Option<Arc<dyn WasmHostNostr>>,
     ) -> Self {
         Self {
             runtime,
@@ -924,6 +927,7 @@ impl WasmRuntimeAdapter {
             runtime_http_egress,
             credential_provider,
             secret_injections,
+            nostr_host,
             prepared: Mutex::new(HashMap::new()),
         }
     }
@@ -935,6 +939,7 @@ impl WasmRuntimeAdapter {
         runtime_http_egress: SharedRuntimeHttpEgress,
         credential_provider: Option<Arc<dyn WasmRuntimeCredentialProvider>>,
         secret_injections: Arc<RuntimeSecretInjectionStore>,
+        nostr_host: Option<Arc<dyn WasmHostNostr>>,
     ) -> Result<Self, WasmError> {
         Ok(Self::new(
             WitToolRuntime::new(config)?,
@@ -943,6 +948,7 @@ impl WasmRuntimeAdapter {
             runtime_http_egress,
             credential_provider,
             secret_injections,
+            nostr_host,
         ))
     }
 
@@ -967,7 +973,7 @@ impl WasmRuntimeAdapter {
         );
         let egress = runtime_http_egress(&self.runtime_http_egress);
         let Some(policy) = self.network_policy_store.get(scope, capability_id) else {
-            return if egress.is_some() {
+            let mut host = if egress.is_some() {
                 self.host
                     .clone()
                     .with_http(Arc::new(DenyWasmHostHttp))
@@ -975,13 +981,18 @@ impl WasmRuntimeAdapter {
             } else {
                 self.host.clone().with_secrets(Arc::new(secrets))
             };
+            // No network policy → deny nostr (fail-closed)
+            host = host.with_nostr(Arc::new(DenyWasmHostNostr));
+            return host;
         };
         let Some(egress) = egress else {
-            return self
+            let mut host = self
                 .host
                 .clone()
                 .with_http(Arc::new(DenyWasmHostHttp))
                 .with_secrets(Arc::new(secrets));
+            host = host.with_nostr(Arc::new(DenyWasmHostNostr));
+            return host;
         };
         let mut adapter =
             WasmRuntimeHttpAdapter::new(egress, scope.clone(), capability_id.clone(), policy)
@@ -991,10 +1002,16 @@ impl WasmRuntimeAdapter {
         if let Some(provider) = &self.credential_provider {
             adapter = adapter.with_credential_provider(Arc::clone(provider));
         }
-        self.host
+        let mut host = self
+            .host
             .clone()
             .with_http(Arc::new(adapter))
-            .with_secrets(Arc::new(secrets))
+            .with_secrets(Arc::new(secrets));
+        // Wire production Nostr if available
+        if let Some(nostr) = &self.nostr_host {
+            host = host.with_nostr(Arc::clone(nostr));
+        }
+        host
     }
 }
 
