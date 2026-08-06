@@ -1,5 +1,30 @@
+//! Nostr relay I/O with SSRF protection.
 //!
 //! Implements host-side relay I/O: publish events and subscribe to event streams.
+//!
+//! # Mediation boundary
+//!
+//! This module is the SSRF enforcement boundary for all Nostr relay traffic
+//! from WASM tools. It validates:
+//! - `wss://` scheme enforcement (rejects `ws://`)
+//! - Private IP / loopback / link-local rejection (IPv4 and IPv6, including mapped addresses)
+//! - DNS resolution to private addresses (for IP-literal URLs; hostname-based
+//!   DNS checks are deferred to the adapter layer to avoid blocking/TOCTOU issues)
+//!
+//! The [`WasmHostNostr`] trait in `host.rs` is the kernel-level mediation seam:
+//! the kernel provides the implementation, and the default is
+//! [`DenyWasmHostNostr`] which refuses all operations. Nostr is only enabled
+//! when the composition layer explicitly wires a live implementation via
+//! [`WitToolHost::with_nostr()`].
+//!
+//! The `host_for_scope` adapter in `ironclaw_host_runtime` gates access via
+//! network policy — it decides whether a given capability gets Nostr access at
+//! all. A future `ironclaw_network` WebSocket capability would replace the
+//! direct `tokio_tungstenite` connection with a policy-mediated egress
+//! channel, but the SSRF checks here would remain as a defense-in-depth
+//! layer.
+//!
+//! # SSRF baseline
 //!
 //! All relay I/O is gated by [`validate_relay_url`] which enforces:
 //! - `wss://` scheme only (TLS is required; plaintext `ws://` is rejected)
