@@ -62,7 +62,7 @@ use ironclaw_turns::{
 };
 use ironclaw_wasm::{
     DenyWasmHostHttp, DenyWasmHostNostr, EmptyWasmRuntimeCredentials, PreparedWitTool,
-    WasmError, WasmHostNostr, WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter,
+    WasmError, WasmHostError, WasmHostNostr, WasmRuntimeCredentialProvider, WasmRuntimeHttpAdapter,
     WasmRuntimePolicyDiscarder, WasmStagedRuntimeCredentials, WitToolExecution, WitToolHost,
     WitToolRequest, WitToolRuntime, WitToolRuntimeConfig,
 };

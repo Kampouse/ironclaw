@@ -25,7 +25,7 @@ pub use host::{
     WasmHostTools, WasmHostWorkspace, WasmHttpRequest, WasmHttpResponse,
     WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest, WasmRuntimeHttpAdapter,
     WasmRuntimePolicyDiscarder, WasmStagedRuntimeCredential, WasmStagedRuntimeCredentialScope,
-    WasmStagedRuntimeCredentials, WitToolHost, ProductionWasmHostNostr,
+    WasmStagedRuntimeCredentials, WitToolHost,
 };
 pub use nostr_relay::{publish_nostr_event, subscribe_nostr_events, validate_relay_url};
 pub use nostr_signer::{decode_nostr_private_key, sign_nostr_event, NostrSignError};
