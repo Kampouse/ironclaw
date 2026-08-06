@@ -705,6 +705,29 @@ impl WasmHostNostr for DenyWasmHostNostr {
 }
 
 /// Host services made available to one WASM tool execution.
+///
+/// ## Per-capability wiring
+///
+/// `WitToolHost` is built per-scope in the composition layer
+/// (`host_for_scope`). Each field defaults to a deny/fail-closed
+/// implementation, so WASM gets nothing unless the adapter explicitly
+/// enables it. This is the security gate for all host capabilities.
+///
+/// ### Production Nostr wiring
+///
+/// The `nostr` field defaults to [`DenyWasmHostNostr`]. To enable Nostr for
+/// a specific capability, the composition layer should:
+///
+/// 1. Verify the capability's authority grants Nostr access.
+/// 2. Build a `WasmHostNostr` impl (e.g., one that resolves the private key
+///    from the secret store and delegates relay I/O to
+///    [`crate::nostr_relay::publish_nostr_event`] /
+///    [`crate::nostr_relay::subscribe_nostr_events`]).
+/// 3. Wire it via [`WitToolHost::with_nostr()`].
+///
+/// This crate exports [`crate::nostr_signer::sign_nostr_event`] and the
+/// relay functions so production adapters can compose them without
+/// duplicating signing or relay I/O logic.
 #[derive(Clone)]
 pub struct WitToolHost {
     pub(crate) http: Arc<dyn WasmHostHttp>,

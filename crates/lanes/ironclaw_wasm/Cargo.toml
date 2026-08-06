@@ -17,6 +17,9 @@ bech32 = "0.12"
 sha2 = "0.10"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
+# TLS is provided via rustls-tls-webpki-roots (uses rustls + webpki root certs).
+# This ensures all relay WebSocket connections use TLS with the standard
+# root certificate store — no additional TLS feature configuration needed.
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 url = "2"

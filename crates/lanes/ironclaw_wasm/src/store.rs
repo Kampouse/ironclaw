@@ -9,6 +9,20 @@ use crate::host::{WasmHttpRequest, WitToolHost};
 use crate::types::{WasmLogLevel, WasmLogRecord};
 use ironclaw_wasm_limiter::WasmResourceLimiter;
 
+// ── Security model: per-capability Nostr gating ─────────────────────────
+//
+// The `WitToolHost` is built per-scope in the composition layer
+// (`host_for_scope` in the runtime adapter). The `nostr` field defaults to
+// `DenyWasmHostNostr`, which refuses all Nostr operations. Nostr is only
+// available when the composition layer explicitly wires a non-deny
+// `WasmHostNostr` implementation via `WitToolHost::with_nostr()` — and it
+// should only do so when the capability's authority grants Nostr access.
+//
+// This means the store does NOT need to check Nostr authority itself: the
+// wiring decision at the adapter level IS the gate. If `nostr` is deny,
+// every nostr_sign_event / nostr_publish_event / nostr_subscribe_events
+// call returns an "not configured" error to the WASM guest.
+
 pub(crate) struct StoreData {
     host: WitToolHost,
     pub(crate) limiter: WasmResourceLimiter,

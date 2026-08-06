@@ -5,6 +5,12 @@ package near:agent@0.4.0;
 // Defines the contract between sandboxed tools and the host runtime.
 // Tools export the `tool` interface; the host provides the `host` interface.
 //
+// Version history:
+//   0.4.0 — Added Nostr host functions (nostr-sign-event, nostr-publish-event,
+//            nostr-subscribe-events). Breaking change from 0.3.x: all components
+//            must be recompiled against this WIT before deployment.
+//   0.3.x — Initial stable ABI (HTTP, workspace, secrets, tools, logging).
+//
 // Security Model:
 // - WASM tools are untrusted and run in a sandbox
 // - All capabilities are opt-in (default: no access)
