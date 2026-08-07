@@ -1,5 +1,5 @@
 {
   "nostr": {
-    "secret_name": "buzz_private_key"
+    "secret_name": "wasm_nostr_private_key"
   }
 }

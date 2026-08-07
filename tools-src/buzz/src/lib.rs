@@ -17,7 +17,7 @@
 
 wit_bindgen::generate!({
     world: "sandboxed-tool",
-    path: "../../wit/tool.wit",
+    path: "../../crates/lanes/ironclaw_wasm/wit/tool.wit",
 });
 
 use serde::Deserialize;
@@ -427,7 +427,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
         serde_json::from_str(params).map_err(|e| format!("Failed to parse action JSON: {e}"))?;
 
     // Pre-flight: verify the nostr secret exists
-    let _ = near::agent::host::secret_exists("buzz_private_key");
+    let _ = near::agent::host::secret_exists("wasm_nostr_private_key");
 
     match action {
         BuzzAction::SendMessage {
