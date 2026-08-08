@@ -2607,47 +2607,77 @@ mod tests {
         assert!(
             descriptor
                 .safe_description
-                .contains("Call this before answering when a listed skill could help"),
+                .contains("When the task at hand is one a listed skill covers, call this FIRST"),
             "skill_activate description must tell the model when to use the capability"
         );
+        // The clause that actually moved the metric. With only a statement of what the tool
+        // does, the model solved tasks with `shell` and never activated: measured 0% correct
+        // activation over a 227-skill catalog, with refusals at 0% -- it was not blocked, it
+        // had no reason to ask. Telling it that a skill SUPERSEDES its own plan took that to
+        // 50%, matching claude-code's precision exactly.
         assert!(
             descriptor
                 .safe_description
-                .contains("Ambiguous names fail without loading a skill"),
+                .contains("instead of your own default approach"),
+            "skill_activate description must say a skill replaces the model's default approach"
+        );
+        assert!(
+            descriptor
+                .safe_description
+                .contains("An ambiguous name fails without loading anything"),
             "skill_activate description must not imply every visible bare name is actionable"
         );
+        // Per-skill relevance gate. Telling the model to activate FIRST lifts activation and
+        // over-reach together: measured, the ported build activated `docx` for a task whose only
+        // deliverable is an .xlsx file. The old guard said "do not activate skills unrelated to
+        // the task", which is too vague to stop an adjacent guess. This makes the test concrete
+        // and evidence-based -- does the task EXPLICITLY involve what the description names --
+        // and it gates each skill individually rather than capping the set size, which is what
+        // the reverted "smallest relevant set" wording did wrong.
         assert!(
             descriptor
                 .safe_description
-                .contains("at most four active skills total per run"),
+                .contains("only when the task EXPLICITLY involves what its description names"),
+            "skill_activate description must gate each skill on explicit task relevance"
+        );
+        assert!(
+            descriptor
+                .safe_description
+                .contains("at most eight active per run"),
             "skill_activate description must advertise the selector's activation limit"
         );
+        // One skill per call, which is claude-code's `Skill` tool shape. The array form invited
+        // over-reach: measured over 29 runs, single-skill calls were 12 correct and 0 wrong while
+        // multi-skill calls were 10 correct and 1 wrong -- every wrong activation came from a
+        // submitted list. Several skills stay reachable by calling again, so this bounds
+        // commitment per call, not the total.
+        assert!(
+            descriptor.safe_description.contains("one skill per call"),
+            "skill_activate must ask for one skill per call, as claude-code's Skill tool does"
+        );
+        assert_eq!(
+            descriptor
+                .parameters_schema
+                .get("properties")
+                .and_then(|p| p.get("skill"))
+                .and_then(|sk| sk.get("type"))
+                .and_then(serde_json::Value::as_str),
+            Some("string"),
+            "the advertised input must be a single skill name, not an array"
+        );
+        // `names` must NOT be advertised. `parse_skill_activate_names` still ACCEPTS a legacy
+        // `names` array so an in-flight caller or a recorded trace does not hard-fail, but
+        // advertising it is what invited the multi-skill calls the measurement above counted.
+        // This assertion previously required the opposite and contradicted the `skill`-is-a-string
+        // one directly above it -- a leftover from before the schema was narrowed.
         assert!(
             descriptor
                 .parameters_schema
                 .get("properties")
                 .and_then(|properties| properties.get("names"))
-                .is_some()
-        );
-        assert_eq!(
-            descriptor
-                .parameters_schema
-                .get("properties")
-                .and_then(|properties| properties.get("names"))
-                .and_then(|names| names.get("description"))
-                .and_then(serde_json::Value::as_str),
-            Some(
-                "Exact skill names copied from the available-skills list; at most four total per run"
-            )
-        );
-        assert_eq!(
-            descriptor
-                .parameters_schema
-                .get("properties")
-                .and_then(|properties| properties.get("names"))
-                .and_then(|names| names.get("maxItems"))
-                .and_then(serde_json::Value::as_u64),
-            Some(4)
+                .is_none(),
+            "a legacy `names` array is accepted but must not be advertised, or the model is \
+             invited back into the shape that produced every wrong activation"
         );
         let tool_definition = port
             .tool_definitions()
