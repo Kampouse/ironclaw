@@ -25,7 +25,7 @@ use agent_client_protocol::{
     ProtocolVersion, SessionId, SessionNotification, SessionUpdate, StopReason,
 };
 use clap::Args;
-use ironclaw_reborn_composition::{RebornRuntime, build_reborn_runtime};
+use ironclaw_composition::{RebornRuntime, build_reborn_runtime};
 use tokio_util::compat::TokioAsyncReadCompatExt;
 use tokio_util::sync::CancellationToken;
 
