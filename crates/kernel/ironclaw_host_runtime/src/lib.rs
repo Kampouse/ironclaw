@@ -143,7 +143,7 @@ pub use production::DefaultHostRuntime;
 pub use services::ProductAuthRuntimeHandoffGuard;
 pub use services::{
     ExtensionLaneToolBinder, ExtensionToolBindError, HostRuntimeServices,
-    ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
+    KernelNostrHost, ProductAuthCredentialStageError, ProductAuthProviderRuntimePorts,
     ProductionEventStoreWiringError, ProductionWiringComponent, ProductionWiringConfig,
     ProductionWiringIssue, ProductionWiringIssueKind, ProductionWiringReport,
     RegisteredRuntimeHealth,

@@ -14,7 +14,7 @@ use super::{
     RunProfileResolver, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
     RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStorePort,
     SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
-    TurnRunWakeNotifier, WasmError, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
+    TurnRunWakeNotifier, WasmError, WasmHostNostr, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
     WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores,
     production_wiring_report, set_runtime_http_egress, set_tool_call_http_egress,
 };
@@ -829,6 +829,18 @@ where
     {
         self.component_types.mcp_runtime = Some(ProductionComponentType::of::<T>());
         self.mcp_runtime = Some(runtime);
+        self
+    }
+
+    /// Attaches a production Nostr host for WASM extensions.
+    ///
+    /// When set, the `WasmRuntimeAdapter` wraps the host in a per-scope
+    /// `WasmRuntimeNostrAdapter` that carries `ResourceScope` and
+    /// `CapabilityId` for audit logging. When omitted (the default),
+    /// `DenyWasmHostNostr` is installed and all Nostr host calls are
+    /// refused.
+    pub fn with_nostr_host(mut self, nostr_host: Arc<dyn WasmHostNostr>) -> Self {
+        self.nostr_host = Some(nostr_host);
         self
     }
 

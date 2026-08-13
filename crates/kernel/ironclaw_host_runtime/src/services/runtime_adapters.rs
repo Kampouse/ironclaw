@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     marker::PhantomData,
     panic::AssertUnwindSafe,
-    sync::{Arc, LazyLock, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use async_trait::async_trait;
@@ -1007,9 +1007,15 @@ impl WasmRuntimeAdapter {
             .clone()
             .with_http(Arc::new(adapter))
             .with_secrets(Arc::new(secrets));
-        // Wire production Nostr if available
+        // Wire production Nostr if available, wrapped in a per-scope adapter
+        // for audit logging (scope + capability_id attribution on every call).
         if let Some(nostr) = &self.nostr_host {
-            host = host.with_nostr(Arc::clone(nostr));
+            let adapter = ironclaw_wasm::WasmRuntimeNostrAdapter::new(
+                Arc::clone(nostr),
+                scope.clone(),
+                capability_id.clone(),
+            );
+            host = host.with_nostr(Arc::new(adapter));
         }
         host
     }
@@ -1231,73 +1237,25 @@ pub(super) fn wasm_error_kind(error: &WasmError) -> RuntimeDispatchErrorKind {
 // ---------------------------------------------------------------------------
 
 use ironclaw_wasm::{decode_nostr_private_key, sign_nostr_event};
-use ironclaw_wasm::{publish_nostr_event, subscribe_nostr_events};
-
-/// Dedicated Tokio runtime for Nostr relay egress.
-///
-/// Uses a single worker thread (same pattern as `FILESYSTEM_RUNTIME` in
-/// `http_body.rs`). The runtime is lazily initialised on first use; if
-/// construction fails the error is stored and returned on every subsequent
-/// call.
-static NOSTR_EGRESS_RUNTIME: LazyLock<Result<tokio::runtime::Runtime, WasmHostError>> =
-    LazyLock::new(|| {
-        tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .thread_name("ironclaw-nostr-egress")
-            .enable_all()
-            .build()
-            .map_err(|e| WasmHostError::Failed(format!("nostr egress runtime: {e}")))
-    });
+use super::nostr_relay::{self, block_on_nostr};
 
 /// Production Nostr host for the kernel adapter layer.
 ///
 /// Resolves the signing key from the secret store and delegates relay I/O
-/// to the publicly exported `ironclaw_wasm::nostr_relay` / `nostr_signer`
-/// functions. SSRF protection (private IP rejection, wss://-only enforcement)
-/// is handled by those modules; mediation (network policy gating) happens
+/// to the crate-local `nostr_relay` module. SSRF protection (private IP
+/// rejection, wss://-only enforcement) is handled by `ironclaw_wasm::validate_relay_url`
+/// which the relay functions call; mediation (network policy gating) happens
 /// at the `host_for_scope` adapter level.
-pub(super) struct KernelNostrHost {
+pub struct KernelNostrHost {
     private_key_bytes: [u8; 32],
 }
 
 impl KernelNostrHost {
     /// Build a kernel Nostr host from a hex or nsec private key.
-    pub(super) fn new(hex_or_nsec_key: &str) -> Result<Self, WasmHostError> {
+    pub fn new(hex_or_nsec_key: &str) -> Result<Self, WasmHostError> {
         let private_key_bytes = decode_nostr_private_key(hex_or_nsec_key)
             .map_err(|e| WasmHostError::Failed(format!("nostr key: {e}")))?;
         Ok(Self { private_key_bytes })
-    }
-
-    /// Block on an async future using the dedicated Nostr egress runtime.
-    ///
-    /// Uses the same thread-scope + block_on pattern as the kernel's
-    /// `block_on_filesystem` in http_body.rs: spawn a dedicated thread inside
-    /// `std::thread::scope`, call `block_on` there, and wrap the result in
-    /// `catch_unwind` so panics are reported as errors rather than aborting.
-    fn block_on_nostr<F, T>(future: F) -> Result<T, WasmHostError>
-    where
-        F: std::future::Future<Output = Result<T, WasmHostError>> + Send + 'static,
-        T: Send + 'static,
-    {
-        let runtime = NOSTR_EGRESS_RUNTIME.as_ref().map_err(|e| e.clone())?;
-        let handle = runtime.handle().clone();
-        std::thread::scope(|scope| {
-            let joined = scope.spawn(move || {
-                let result = std::panic::catch_unwind(AssertUnwindSafe(|| handle.block_on(future)));
-                match result {
-                    Ok(Ok(value)) => Ok(value),
-                    Ok(Err(error)) => Err(error),
-                    Err(_) => Err(WasmHostError::Failed(
-                        "Nostr egress task panicked".to_string(),
-                    )),
-                }
-            });
-            joined.join().unwrap_or_else(|_| {
-                Err(WasmHostError::Failed(
-                    "Nostr egress thread panicked".to_string(),
-                ))
-            })
-        })
     }
 }
 
@@ -1315,8 +1273,8 @@ impl WasmHostNostr for KernelNostrHost {
     ) -> Result<String, WasmHostError> {
         let url = relay_url.to_string();
         let event = signed_event_json.to_string();
-        Self::block_on_nostr(async move {
-            publish_nostr_event(&url, &event, remaining_deadline_ms).await
+        block_on_nostr(async move {
+            nostr_relay::publish_nostr_event(&url, &event, remaining_deadline_ms).await
         })
     }
 
@@ -1329,8 +1287,9 @@ impl WasmHostNostr for KernelNostrHost {
     ) -> Result<String, WasmHostError> {
         let url = relay_url.to_string();
         let filter = filter_json.to_string();
-        Self::block_on_nostr(async move {
-            subscribe_nostr_events(&url, &filter, timeout_ms, remaining_deadline_ms).await
+        block_on_nostr(async move {
+            nostr_relay::subscribe_nostr_events(&url, &filter, timeout_ms, remaining_deadline_ms)
+                .await
         })
     }
 }

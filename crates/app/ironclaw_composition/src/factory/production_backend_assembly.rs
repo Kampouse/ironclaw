@@ -746,6 +746,7 @@ pub(super) async fn build_backend_production(
         ),
     ));
     services = attach_wasm_runtime(services)?;
+    services = attach_nostr_host(services);
     // Re-project the ports after attaching product-auth. Hosted MCP
     // preparation and first-party registrars must receive the account-aware
     // obligation handler, not the earlier provider-bootstrap projection.

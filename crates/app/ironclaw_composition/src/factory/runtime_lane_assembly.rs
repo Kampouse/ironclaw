@@ -113,6 +113,41 @@ where
         })
 }
 
+/// Attaches a production Nostr host when `IRONCLAW_REBORN_NOSTR_PRIVATE_KEY`
+/// is set in the process environment.
+///
+/// The key must be a hex-encoded 32-byte private key or an `nsec…` bech32
+/// string.  When the env var is absent (the default), the builder keeps the
+/// existing `DenyWasmHostNostr` and all Nostr host calls are refused at
+/// runtime — this is fail-closed for deployments that do not opt into Nostr.
+pub(super) fn attach_nostr_host<F, G>(
+    services: HostRuntimeServices<F, G>,
+) -> HostRuntimeServices<F, G>
+where
+    F: ironclaw_filesystem::RootFilesystem + 'static,
+    G: ironclaw_resources::ResourceGovernor + 'static,
+{
+    match std::env::var("IRONCLAW_REBORN_NOSTR_PRIVATE_KEY") {
+        Ok(key) if !key.is_empty() => {
+            match ironclaw_host_runtime::KernelNostrHost::new(&key) {
+                Ok(host) => {
+                    tracing::info!("production Nostr host wired (key prefix: {}…)",
+                        &key[..key.len().min(8)]);
+                    services.with_nostr_host(std::sync::Arc::new(host))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "IRONCLAW_REBORN_NOSTR_PRIVATE_KEY set but invalid: {e}; \
+                         Nostr host disabled"
+                    );
+                    services
+                }
+            }
+        }
+        _ => services,
+    }
+}
+
 pub(crate) fn apply_production_runtime_process_binding<F, G>(
     services: HostRuntimeServices<F, G>,
     binding: RebornRuntimeProcessBinding,

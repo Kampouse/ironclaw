@@ -704,6 +704,122 @@ impl WasmHostNostr for DenyWasmHostNostr {
     }
 }
 
+/// Per-scope Nostr adapter that wraps a concrete [`WasmHostNostr`] implementation.
+///
+/// Follows the same pattern as [`WasmRuntimeHttpAdapter`] — the composition layer
+/// constructs one of these per `host_for_scope` call, binding a `ResourceScope`
+/// and `CapabilityId` to the underlying Nostr host. Every delegation call logs the
+/// scope and capability for audit trail.
+///
+/// This ensures that even if the same `WasmHostNostr` instance is shared across
+/// capabilities, each invocation can be attributed to a specific scope/capability
+/// in logs and metrics.
+pub struct WasmRuntimeNostrAdapter<N> {
+    inner: N,
+    scope: ResourceScope,
+    capability_id: CapabilityId,
+}
+
+impl<N> WasmRuntimeNostrAdapter<N>
+where
+    N: WasmHostNostr,
+{
+    pub fn new(inner: N, scope: ResourceScope, capability_id: CapabilityId) -> Self {
+        Self {
+            inner,
+            scope,
+            capability_id,
+        }
+    }
+}
+
+impl<N> std::fmt::Debug for WasmRuntimeNostrAdapter<N>
+where
+    N: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WasmRuntimeNostrAdapter")
+            .field("inner", &self.inner)
+            .field("scope", &self.scope)
+            .field("capability_id", &self.capability_id)
+            .finish()
+    }
+}
+
+impl<N: WasmHostNostr> WasmHostNostr for WasmRuntimeNostrAdapter<N> {
+    fn sign_event(&self, unsigned_event_json: &str) -> Result<String, WasmHostError> {
+        tracing::debug!(
+            scope = ?self.scope,
+            capability_id = %self.capability_id,
+            "nostr: sign_event (scoped adapter)"
+        );
+        self.inner.sign_event(unsigned_event_json)
+    }
+
+    fn publish_event(
+        &self,
+        relay_url: &str,
+        signed_event_json: &str,
+        remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
+        tracing::debug!(
+            scope = ?self.scope,
+            capability_id = %self.capability_id,
+            relay_url = relay_url,
+            "nostr: publish_event (scoped adapter)"
+        );
+        self.inner
+            .publish_event(relay_url, signed_event_json, remaining_deadline_ms)
+    }
+
+    fn subscribe_events(
+        &self,
+        relay_url: &str,
+        filter_json: &str,
+        timeout_ms: u32,
+        remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
+        tracing::debug!(
+            scope = ?self.scope,
+            capability_id = %self.capability_id,
+            relay_url = relay_url,
+            timeout_ms = timeout_ms,
+            "nostr: subscribe_events (scoped adapter)"
+        );
+        self.inner
+            .subscribe_events(relay_url, filter_json, timeout_ms, remaining_deadline_ms)
+    }
+}
+
+// Allow `Arc<dyn WasmHostNostr>` to be used as the inner type of
+// `WasmRuntimeNostrAdapter`. This is needed because `host_for_scope` stores
+// the Nostr host as `Option<Arc<dyn WasmHostNostr>>` and passes `Arc::clone`
+// to the adapter.
+impl WasmHostNostr for Arc<dyn WasmHostNostr> {
+    fn sign_event(&self, unsigned_event_json: &str) -> Result<String, WasmHostError> {
+        (**self).sign_event(unsigned_event_json)
+    }
+
+    fn publish_event(
+        &self,
+        relay_url: &str,
+        signed_event_json: &str,
+        remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
+        (**self).publish_event(relay_url, signed_event_json, remaining_deadline_ms)
+    }
+
+    fn subscribe_events(
+        &self,
+        relay_url: &str,
+        filter_json: &str,
+        timeout_ms: u32,
+        remaining_deadline_ms: Option<u32>,
+    ) -> Result<String, WasmHostError> {
+        (**self).subscribe_events(relay_url, filter_json, timeout_ms, remaining_deadline_ms)
+    }
+}
+
 /// Host services made available to one WASM tool execution.
 ///
 /// ## Per-capability wiring

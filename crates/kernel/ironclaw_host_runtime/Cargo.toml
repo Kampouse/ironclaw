@@ -70,7 +70,8 @@ sha2 = "0.11"
 static_assertions = "1"
 thiserror = "2"
 # — needed directly to compute the CA's leaf-cert validity window.
-tokio = { version = "1", features = ["io-util", "macros", "process", "rt", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 tokio-util = { version = "0.7" }
 tracing = "0.1"
 url = "2"

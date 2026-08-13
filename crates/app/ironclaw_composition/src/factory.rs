@@ -243,8 +243,8 @@ use production_build_assembly::{
 };
 pub(crate) use runtime_lane_assembly::apply_production_runtime_process_binding;
 use runtime_lane_assembly::{
-    apply_post_edit_check_from_env, attach_hosted_mcp_runtime, attach_wasm_runtime,
-    default_host_http_egress, require_product_auth_runtime_ports,
+    apply_post_edit_check_from_env, attach_hosted_mcp_runtime, attach_nostr_host,
+    attach_wasm_runtime, default_host_http_egress, require_product_auth_runtime_ports,
 };
 
 /// Filename of the cached standalone secrets master-key dotfile under a

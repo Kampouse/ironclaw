@@ -96,6 +96,7 @@ mod wasm_blocking;
 mod wasm_diagnostics;
 mod wasm_execution;
 mod wasm_secrets;
+mod nostr_relay;
 
 use production_wiring::{
     ProductionComponentType, ProductionComponentTypes, ProductionImplementationReadiness,
@@ -115,6 +116,7 @@ use tool_resolver::RegistryLaneToolResolver;
 
 use extension_tool_binder::ServiceLanePackageBinder;
 pub use extension_tool_binder::{ExtensionLaneToolBinder, ExtensionToolBindError};
+pub use runtime_adapters::KernelNostrHost;
 use ironclaw_capabilities::ChainToolResolver;
 
 /// Concrete composition bundle for one Reborn host-runtime vertical slice.
