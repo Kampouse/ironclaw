@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::runtime_adapters::KernelNostrHost;
 use super::LibSqlRootFilesystem;
 use super::PostgresRootFilesystem;
 use super::{
@@ -13,7 +14,7 @@ use super::{
     RebornEventStoreError, RebornEventStores, RebornProfile, ResourceGovernor, RootFilesystem,
     RunProfileResolver, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
     RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStorePort,
-    SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
+    SecurityAuditSink, SharedSecretStore, TrustPolicy,
     TurnRunWakeNotifier, UserSandboxProcessPort, WasmError, WasmHostNostr, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
     WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores,
     production_wiring_report, set_runtime_http_egress, set_tool_call_http_egress,
@@ -910,7 +911,7 @@ where
         self,
         nostr_private_key: &str,
     ) -> Result<Self, WasmError> {
-        let nostr_host = ironclaw_wasm::ProductionWasmHostNostr::from_key_str(nostr_private_key)
+        let nostr_host = KernelNostrHost::new(nostr_private_key)
             .map_err(|e| WasmError::CompilationFailed(format!("invalid nostr key: {e}")))?;
         let host = WitToolHost::deny_all().with_nostr(std::sync::Arc::new(nostr_host));
         self.try_with_wasm_runtime(WitToolRuntimeConfig::default(), host)

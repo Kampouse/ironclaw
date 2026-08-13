@@ -979,12 +979,13 @@ impl WasmRuntimeAdapter {
                     .clone()
                     .with_http(Arc::new(DenyWasmHostHttp))
                     .with_secrets(Arc::new(secrets))
+                    .with_nostr(Arc::new(DenyWasmHostNostr))
             } else {
-                self.host.clone().with_secrets(Arc::new(secrets))
+                self.host
+                    .clone()
+                    .with_secrets(Arc::new(secrets))
+                    .with_nostr(Arc::new(DenyWasmHostNostr))
             };
-            // No network policy → deny nostr (fail-closed)
-            host = host.with_nostr(Arc::new(DenyWasmHostNostr));
-            return host;
         };
         let Some(egress) = egress else {
             let mut host = self
