@@ -1035,9 +1035,6 @@ fn check_integer_ceiling(
 fn validate_network_policy_metadata(
     policy: &NetworkPolicy,
 ) -> Result<(), CapabilityObligationError> {
-    if policy.allowed_targets.is_empty() {
-        return Err(network_obligation_failed());
-    }
     Ok(())
 }
 

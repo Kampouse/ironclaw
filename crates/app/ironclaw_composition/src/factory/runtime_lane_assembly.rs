@@ -179,10 +179,17 @@ where
 
 /// Resolves the WASM Nostr private key from the secret store.
 ///
-/// Looks up `wasm_nostr_private_key` in the tenant-shared managed scope
-/// (so the admin sets it once and all users inherit). Returns `None` if the
-/// secret does not exist or lease/consume fails — WASM tools that need Nostr
-/// will get deny-all behaviour.
+/// Uses `metadata()` (non-destructive peek) to check existence, then
+/// `lease_once` + `consume` to read the value. This is correct because
+/// `resolve_wasm_nostr_key` runs once at runtime assembly to provision the
+/// host-level `ProductionWasmHostNostr`. The secret's presence is verified
+/// again at dispatch time by the credential preflight / obligation handler
+/// via a *separate* store instance (the credential_preflight_store), so the
+/// key must remain available there.
+///
+/// In practice, the admin re-injects the secret after each serve restart
+/// (it is one-time-consume by design). The host-level nostr key persists
+/// for the lifetime of the runtime assembly.
 pub(super) async fn resolve_wasm_nostr_key(
     secret_store: &Arc<dyn SecretStorePort>,
     scope: &ResourceScope,
@@ -203,15 +210,23 @@ pub(super) async fn resolve_wasm_nostr_key(
         return Ok(None);
     }
     let lease = match secret_store.lease_once(&shared_scope, &handle).await {
-        Ok(lease) => lease,
-        Err(_) => return Ok(None),
+        Ok(lease) => {
+            lease
+        }
+        Err(e) => {
+            return Ok(None);
+        }
     };
     let material = match secret_store
         .consume(&shared_scope, lease.id)
         .await
     {
-        Ok(material) => material,
-        Err(_) => return Ok(None),
+        Ok(material) => {
+            material
+        }
+        Err(e) => {
+            return Ok(None);
+        }
     };
     Ok(Some(material.expose_secret().to_string()))
 }

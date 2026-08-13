@@ -426,9 +426,6 @@ fn execute_inner(params: &str) -> Result<String, String> {
     let action: BuzzAction =
         serde_json::from_str(params).map_err(|e| format!("Failed to parse action JSON: {e}"))?;
 
-    // Pre-flight: verify the nostr secret exists
-    let _ = near::agent::host::secret_exists("wasm_nostr_private_key");
-
     match action {
         BuzzAction::SendMessage {
             channel_id,

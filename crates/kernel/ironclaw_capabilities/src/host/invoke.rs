@@ -60,7 +60,8 @@ where
         // authorization, obligation preparation, and (Slice C) minting the
         // sealed `Authorized` witness — is one method. `invoke_json` maps its
         // `AuthorizeResult` back to today's exact dispatch and error behavior.
-        let (obligations, obligation_outcome, authorized) = match self.authorize(&request).await? {
+        let auth_result = self.authorize(&request).await;
+        let (obligations, obligation_outcome, authorized) = match auth_result? {
             AuthorizeFold::Authorized(fold) => {
                 let AuthorizedFold {
                     result,

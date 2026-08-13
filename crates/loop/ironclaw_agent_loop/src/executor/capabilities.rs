@@ -1705,7 +1705,7 @@ fn deny_reason_tag(reason: DenyReason) -> &'static str {
         DenyReason::InvalidPath => "invalid_path",
         DenyReason::PathOutsideMount => "path_outside_mount",
         DenyReason::UnknownCapability => "unknown_capability",
-        DenyReason::UnknownSecret => "unknown_secret",
+        DenyReason::UnknownSecret => "credential_unavailable",
         DenyReason::NetworkDenied => "network_denied",
         DenyReason::BudgetDenied => "budget_denied",
         DenyReason::ApprovalDenied => "approval_denied",

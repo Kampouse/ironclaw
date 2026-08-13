@@ -1163,7 +1163,7 @@ impl ironclaw_capabilities::HostPolicyFacts for DefaultHostRuntime {
             return CredentialPresence::Satisfied;
         };
         let (required_secrets, requirements) = capability_credential_requirements(descriptor);
-        if required_secrets.is_empty() {
+        if required_secrets.is_empty() && requirements.is_empty() {
             return CredentialPresence::Satisfied;
         }
 

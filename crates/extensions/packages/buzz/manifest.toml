@@ -15,6 +15,7 @@ description = "Send a message to a Buzz channel via Nostr relay"
 effects = ["network"]
 default_permission = "ask"
 visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/buzz.input.v1.json"
 prompt_doc_ref = "prompts/buzz.description.v1.md"
 
@@ -24,5 +25,6 @@ description = "Subscribe to events in a Buzz channel via Nostr relay"
 effects = ["network"]
 default_permission = "ask"
 visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
 input_schema_ref = "schemas/buzz.input.v1.json"
 prompt_doc_ref = "prompts/buzz.description.v1.md"

@@ -972,8 +972,9 @@ impl WasmRuntimeAdapter {
             capability_id.clone(),
         );
         let egress = runtime_http_egress(&self.runtime_http_egress);
-        let Some(policy) = self.network_policy_store.get(scope, capability_id) else {
-            let mut host = if egress.is_some() {
+        let policy_lookup = self.network_policy_store.get(scope, capability_id);
+        let Some(policy) = policy_lookup else {
+            return if egress.is_some() {
                 self.host
                     .clone()
                     .with_http(Arc::new(DenyWasmHostHttp))
