@@ -93,9 +93,13 @@ fn is_private_or_loopback_host(host: &str) -> bool {
         return true;
     }
 
-    // Try to parse as an IP address (handles both IPv4 and IPv6 bracketed forms).
-    // `url::Host` parsing handles [::1] brackets for us.
-    let ip_host = match lower.parse::<std::net::IpAddr>() {
+    // Strip IPv6 brackets if present (e.g. "[::1]" → "::1")
+    let host_for_parse = lower
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(&lower);
+
+    let ip_host = match host_for_parse.parse::<std::net::IpAddr>() {
         Ok(ip) => ip,
         Err(_) => {
             // Not an IP literal — for non-IP hosts we cannot do DNS resolution
