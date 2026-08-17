@@ -140,9 +140,10 @@ impl Clone for RebornAcpAgent {
 /// Sanitize an internal error into a JSON-RPC error whose message does not
 /// contain raw internal diagnostics (issue #12).
 fn internal_error(msg: &str) -> Error {
+    tracing::debug!(internal_error = %msg, "ACP serve internal error (sanitized to peer)");
     Error::new(
         -32603,
-        format!("{INTERNAL_ERROR_CATEGORY}: {msg}"),
+        INTERNAL_ERROR_CATEGORY.to_string(),
     )
 }
 
@@ -595,7 +596,7 @@ mod tests {
     #[test]
     fn internal_error_sanitizes_message() {
         let err = internal_error("database at /var/lib/db/secret.sqlite3 is corrupt");
-        let msg = err.message.unwrap_or_default();
+        let msg = &err.message;
         assert!(
             msg.contains(INTERNAL_ERROR_CATEGORY),
             "sanitized message must contain the category: {msg}"
