@@ -1602,7 +1602,7 @@ async fn wasm_nostr_sign_event_flows_through_host_pipeline() {
 
     let mock_nostr = Arc::new(MockWasmHostNostr::with_sign_ok(&signed_event.to_string()));
     let adapter = Arc::new(WasmRuntimeAdapter::with_host(
-        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+        WitToolHost::deny_all().with_nostr(mock_nostr.clone() as Arc<dyn ironclaw_wasm::WasmHostNostr>),
     ));
     let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
@@ -1772,7 +1772,7 @@ async fn wasm_nostr_publish_event_flows_through_host_pipeline() {
 
     let mock_nostr = Arc::new(MockWasmHostNostr::new());
     let adapter = Arc::new(WasmRuntimeAdapter::with_host(
-        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+        WitToolHost::deny_all().with_nostr(mock_nostr.clone() as Arc<dyn ironclaw_wasm::WasmHostNostr>),
     ));
     let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
@@ -1943,7 +1943,7 @@ async fn wasm_nostr_subscribe_events_flows_through_host_pipeline() {
 
     let mock_nostr = Arc::new(MockWasmHostNostr::new());
     let adapter = Arc::new(WasmRuntimeAdapter::with_host(
-        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+        WitToolHost::deny_all().with_nostr(mock_nostr.clone() as Arc<dyn ironclaw_wasm::WasmHostNostr>),
     ));
     let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
         .with_event_sink_arc(Arc::new(events.clone()));
@@ -2044,7 +2044,7 @@ async fn buzz_subscribe_channel_dispatches_through_host_pipeline() {
     ));
 
     let adapter = Arc::new(WasmRuntimeAdapter::with_host_and_config(
-        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+        WitToolHost::deny_all().with_nostr(mock_nostr.clone() as Arc<dyn ironclaw_wasm::WasmHostNostr>),
         WitToolRuntimeConfig::for_testing_with_memory(2 * 1024 * 1024),
     ));
     let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
@@ -2114,7 +2114,7 @@ async fn buzz_send_message_dispatches_sign_and_publish() {
     *mock_nostr.publish_result.lock().unwrap() = Some(Ok("event-123".to_string()));
 
     let adapter = Arc::new(WasmRuntimeAdapter::with_host_and_config(
-        WitToolHost::deny_all().with_nostr(Arc::clone(&mock_nostr)),
+        WitToolHost::deny_all().with_nostr(mock_nostr.clone() as Arc<dyn ironclaw_wasm::WasmHostNostr>),
         WitToolRuntimeConfig::for_testing_with_memory(2 * 1024 * 1024),
     ));
     let dispatcher = dispatcher_for(&registry, Arc::new(fs), Arc::clone(&governor), &adapter)
