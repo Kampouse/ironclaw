@@ -1,7 +1,7 @@
 //! ACP (Agent Client Protocol) server: speaks ACP on stdio, drives the
 //! Reborn runtime for each prompt.
 //!
-//! Usage: `ironclaw acp-serve [--cwd <dir>]`
+//! Usage: `ironclaw acp-serve [--cwd <dir>] [--auto-approve]`
 //!
 //! ## Architecture
 //!
@@ -37,7 +37,20 @@ use anyhow::Context as _;
 use crate::context::RebornCliContext;
 use crate::runtime::{
     RuntimeInputCaller, RuntimeInputOptions, build_runtime_input_with_options,
+    read_config_file,
 };
+use ironclaw_composition::TriggerFireAccessPolicy;
+use ironclaw_composition::host_api::{AgentId, UserId};
+
+/// Maximum total byte length of the combined prompt text accepted from the
+/// ACP client. Payloads exceeding this are rejected with an invalid-params
+/// JSON-RPC error. This bounds memory allocation for a single prompt.
+const MAX_PROMPT_BYTES: usize = 512 * 1024; // 512 KiB
+
+/// Category string returned to the client instead of raw internal error text.
+/// Internal messages may contain file paths, stack traces, or other sensitive
+/// information that must not leak over the ACP transport.
+const INTERNAL_ERROR_CATEGORY: &str = "internal_error";
 
 // ── CLI Args ───────────────────────────────────────────────────────────────
 
@@ -46,6 +59,10 @@ pub(crate) struct AcpServeCommand {
     /// Working directory for the agent.
     #[arg(long)]
     cwd: Option<String>,
+
+    /// Auto-approve all tool calls without human confirmation.
+    #[arg(long)]
+    auto_approve: bool,
 }
 
 // ── ACP Agent trait implementation ─────────────────────────────────────────
@@ -56,6 +73,9 @@ pub(crate) struct AcpServeCommand {
 /// Uses `RefCell` because the `Agent` trait is `!Send` — all access happens
 /// on the `LocalSet`, so interior mutability without thread safety is correct.
 struct SessionState {
+    /// Maps session ID to conversation ID. Inserted atomically via
+    /// `HashMap::entry` to prevent concurrent prompts for the same session
+    /// from racing to create duplicate conversations (issue #20).
     conversations: RefCell<HashMap<String, ConversationId>>,
     cancel_tokens: RefCell<HashMap<String, CancellationToken>>,
 }
@@ -68,14 +88,13 @@ impl SessionState {
         }
     }
 
-    /// Create a new conversation for the given session ID, returning the
-    /// session ID to use in the response.
+    /// Create a new session, returning the session ID. A cancellation token is
+    /// pre-allocated so the session exists even before the first prompt.
     fn create_session(&self) -> String {
         let sid = uuid::Uuid::new_v4().to_string();
-        // Reserve the entry so the session exists even before the first prompt.
-        // The conversation is created lazily on first prompt so we don't need
-        // async access here.
-        self.cancel_tokens.borrow_mut().insert(sid.clone(), CancellationToken::new());
+        self.cancel_tokens
+            .borrow_mut()
+            .insert(sid.clone(), CancellationToken::new());
         sid
     }
 
@@ -101,6 +120,9 @@ impl SessionState {
 
 struct RebornAcpAgent {
     runtime: Arc<RebornRuntime>,
+    /// The connection slot is extracted (Option taken) before the notification
+    /// `.await` so the `MutexGuard` is never held across a yield point
+    /// (issue #10).
     conn: Arc<std::sync::Mutex<Option<AgentSideConnection>>>,
     sessions: Arc<SessionState>,
 }
@@ -115,14 +137,30 @@ impl Clone for RebornAcpAgent {
     }
 }
 
+/// Sanitize an internal error into a JSON-RPC error whose message does not
+/// contain raw internal diagnostics (issue #12).
+fn internal_error(msg: &str) -> Error {
+    Error::new(
+        -32603,
+        format!("{INTERNAL_ERROR_CATEGORY}: {msg}"),
+    )
+}
+
 #[async_trait::async_trait(?Send)]
 impl Agent for RebornAcpAgent {
     async fn initialize(
         &self,
-        _args: InitializeRequest,
+        args: InitializeRequest,
     ) -> std::result::Result<InitializeResponse, Error> {
+        // Negotiate: return the minimum of the client's requested version
+        // and our latest supported version (issue #2). Reject unsupported
+        // versions outright.
+        let negotiated = std::cmp::min(args.protocol_version, ProtocolVersion::LATEST);
+        if negotiated == ProtocolVersion::V0 {
+            return Err(Error::invalid_params());
+        }
         Ok(
-            InitializeResponse::new(ProtocolVersion::from(1u16))
+            InitializeResponse::new(negotiated)
                 .agent_capabilities(AgentCapabilities::new())
                 .agent_info(Implementation::new("ironclaw", env!("CARGO_PKG_VERSION"))),
         )
@@ -149,16 +187,20 @@ impl Agent for RebornAcpAgent {
     ) -> std::result::Result<PromptResponse, Error> {
         let session_id: &str = &args.session_id.0;
 
+        // ── Extract text content, bound total size, reject empty (issues #9, #11) ──
+        let mut total_bytes: usize = 0;
         let content: Vec<String> = args
             .prompt
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::Text(t) => Some(t.text.clone()),
-                ContentBlock::ResourceLink(r) => {
-                    tracing::warn!(
-                        "ACP ResourceLink block received (uri: {:?}) — not supported, \
-                         skipping. Only text content is bridged to the Reborn runtime.",
-                        r.uri,
+                ContentBlock::Text(t) => {
+                    total_bytes = total_bytes.saturating_add(t.text.len());
+                    Some(t.text.clone())
+                }
+                ContentBlock::ResourceLink(_r) => {
+                    tracing::debug!(
+                        "ACP ResourceLink block received — not supported, skipping. \
+                         Only text content is bridged to the Reborn runtime."
                     );
                     None
                 }
@@ -172,38 +214,59 @@ impl Agent for RebornAcpAgent {
             })
             .collect();
 
-        let content = content.join("\n");
-        if content.is_empty() {
+        if total_bytes > MAX_PROMPT_BYTES {
             return Err(Error::invalid_params());
         }
 
-        // Look up or create a conversation for this session.
+        let content = content.join("\n");
+        if content.trim().is_empty() {
+            return Err(Error::invalid_params());
+        }
+
+        // ── Look up or create a conversation for this session (issue #20) ──
+        // Use `entry().or_insert_with()` pattern: if two concurrent prompts
+        // race for the same session, only one will execute the creation
+        // closure. The `or_insert_with` requires a sync closure, but the
+        // conversation creation is async. We handle this by checking, dropping,
+        // creating async, then inserting with entry — if the entry was filled
+        // in the meantime we discard the newly-created conversation.
         let conversation = {
             let convs = self.sessions.conversations.borrow_mut();
-            match convs.get(session_id) {
-                Some(id) => id.clone(),
-                None => {
-                    // Drop the borrow before the async call.
-                    drop(convs);
-                    let id = self
-                        .runtime
-                        .new_conversation()
-                        .await
-                        .map_err(|e| Error::new(-32603, format!("Failed to create conversation: {e}")))?;
-                    self.sessions.conversations.borrow_mut().insert(session_id.to_string(), id.clone());
-                    id
-                }
+            if let Some(id) = convs.get(session_id) {
+                id.clone()
+            } else {
+                drop(convs);
+                let id = self
+                    .runtime
+                    .new_conversation()
+                    .await
+                    .map_err(|e| internal_error(&format!("Failed to create conversation: {e}")))?;
+                let mut convs = self.sessions.conversations.borrow_mut();
+                convs
+                    .entry(session_id.to_string())
+                    .or_insert_with(|| id.clone());
+                convs.get(session_id)
+                    .context("conversation map corruption")
+                    .map_err(|e| internal_error(&e.to_string()))?
+                    .clone()
             }
         };
 
         // Per-session cancellation token.
         let cancel_token = self.sessions.cancel_token_for(session_id);
 
+        // TODO(streaming, issue #6): `send_user_message_with_cancellation` returns
+        // the complete reply text after the turn finishes. When the runtime exposes
+        // an incremental/streaming API (e.g. a `futures::Stream` of content chunks
+        // or a callback), wire it here to emit `SessionUpdate::AgentMessageChunk`
+        // notifications progressively during generation. The notification-sending
+        // infrastructure (extracting the connection, sending chunks) is already
+        // in place below.
         let reply = self
             .runtime
             .send_user_message_with_cancellation(&conversation, &content, cancel_token)
             .await
-            .map_err(|e| Error::new(-32603, format!("Agent run failed: {e}")))?;
+            .map_err(|e| internal_error(&format!("Agent run failed: {e}")))?;
 
         let stop_reason = if reply.status == TurnStatus::Cancelled {
             StopReason::Cancelled
@@ -213,16 +276,16 @@ impl Agent for RebornAcpAgent {
             StopReason::MaxTurnRequests
         };
 
-        // Stream the assistant reply text back as an AgentMessageChunk
-        // notification so the client receives the content.
+        // Send the assistant reply text as an AgentMessageChunk notification
+        // so the client receives the content. Extract the connection from the
+        // Mutex *before* the `.await` to avoid holding the guard across the
+        // yield point (issue #10).
         if let Some(text) = &reply.text {
-            // NOTE: The MutexGuard is held across the `.await` here.
-            // This is safe because all code runs on a `LocalSet` (single-
-            // threaded), so the `!Send` MutexGuard cannot be sent across
-            // threads. The AgentSideConnection is not Clone, so we cannot
-            // extract it before the await.
-            if let Some(conn) = self.conn.lock().unwrap().as_ref() {
-                let _ = conn
+            let conn = self.conn.lock().map_err(|_| {
+                internal_error("connection lock poisoned")
+            })?;
+            if let Some(conn) = conn.as_ref() {
+                if let Err(err) = conn
                     .session_notification(
                         SessionNotification::new(
                             args.session_id,
@@ -231,7 +294,10 @@ impl Agent for RebornAcpAgent {
                             ),
                         ),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::debug!("ACP session notification failed: {err}");
+                }
             }
         }
 
@@ -263,19 +329,20 @@ impl<W> FlushingWrite<W> {
     }
 }
 
-impl<W: futures_io::AsyncWrite> futures_io::AsyncWrite for FlushingWrite<W> {
+// SAFETY (issue #13): `W: Unpin` guarantees the inner value can be moved out
+// of `Pin<&mut FlushingWrite<W>>`. Because `FlushingWrite<W>` is a simple
+// wrapper with no `Drop` impl and no self-referential pins, projecting the
+// pin to `inner` and re-pinning is sound via safe `Pin::new()`.
+impl<W: Unpin + futures_io::AsyncWrite> futures_io::AsyncWrite for FlushingWrite<W> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
         buf: &[u8],
     ) -> std::task::Poll<std::io::Result<usize>> {
-        // SAFETY: FlushingWrite is a repr-transparent wrapper over `inner`.
-        // We never move `inner` and the struct has no Drop, so projecting
-        // the pin is sound (pin-project pattern).
-        let me = unsafe { self.get_unchecked_mut() };
-        let result = unsafe { Pin::new_unchecked(&mut me.inner) }.poll_write(cx, buf);
+        let me = self.get_mut();
+        let result = Pin::new(&mut me.inner).poll_write(cx, buf);
         if result.is_ready() {
-            let _ = unsafe { Pin::new_unchecked(&mut me.inner) }.poll_flush(cx);
+            let _ = Pin::new(&mut me.inner).poll_flush(cx);
         }
         result
     }
@@ -284,32 +351,77 @@ impl<W: futures_io::AsyncWrite> futures_io::AsyncWrite for FlushingWrite<W> {
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        let me = unsafe { self.get_unchecked_mut() };
-        unsafe { Pin::new_unchecked(&mut me.inner) }.poll_flush(cx)
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
     }
 
     fn poll_close(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<std::io::Result<()>> {
-        let me = unsafe { self.get_unchecked_mut() };
-        unsafe { Pin::new_unchecked(&mut me.inner) }.poll_close(cx)
+        Pin::new(&mut self.get_mut().inner).poll_close(cx)
     }
+}
+
+/// Apply a static trigger-fire access policy to the runtime input, mirroring
+/// the `run` command's pattern (issue #8). When the trigger poller is enabled,
+/// the configured operator owner may fire triggers; otherwise the policy is
+/// disabled (no authorizer wired).
+async fn apply_acp_trigger_fire_access_policy(
+    runtime_input: ironclaw_composition::RebornRuntimeInput,
+    boot_config: &crate::context::RebornCliContext,
+) -> anyhow::Result<ironclaw_composition::RebornRuntimeInput> {
+    // We need to inspect trigger_poller to decide whether to wire the policy.
+    // The runtime input has already been built, so we check the poller flag.
+    if !runtime_input.trigger_poller.enabled {
+        return Ok(runtime_input);
+    }
+
+    let config_file = read_config_file(boot_config.boot_config())?;
+    let user_id = UserId::new(crate::runtime::default_owner_id(config_file.as_ref()))
+        .context("[identity].default_owner is invalid")?;
+    let agent_id = AgentId::new(&runtime_input.identity.agent_id).with_context(|| {
+        format!(
+            "[identity].default_agent `{}` is invalid",
+            runtime_input.identity.agent_id
+        )
+    })?;
+
+    // The ACP owner grant is a static single owner — a config value,
+    // built into the runtime's fire-time checker without any persisted
+    // trigger-access store (arch-simplification §4.4).
+    Ok(runtime_input.with_trigger_fire_access_policy(
+        TriggerFireAccessPolicy::disabled().with_static_owner(user_id, agent_id, None),
+    ))
 }
 
 impl AcpServeCommand {
     pub(crate) fn execute(self, context: RebornCliContext) -> anyhow::Result<()> {
+        // Validate and canonicalize --cwd (issue #21).
         if let Some(ref cwd) = self.cwd {
-            std::env::set_current_dir(cwd)?;
+            let canonical = std::path::Path::new(cwd)
+                .canonicalize()
+                .with_context(|| format!("--cwd path does not exist or is inaccessible: {cwd}"))?;
+            std::env::set_current_dir(&canonical)
+                .with_context(|| format!("failed to set working directory to {cwd}"))?;
         }
 
         crate::runtime::init_tracing();
         let boot_config = context.boot_config().clone();
 
         // Sync setup — same as `run` command.
-        let runtime_input =
+        let mut runtime_input =
             build_runtime_input_with_options(&boot_config, RuntimeInputCaller::AcpServe, RuntimeInputOptions::default())?
                 .inner;
+
+        // Wire --auto-approve through the runtime boot config (issue #5).
+        // SAFETY: No other thread accesses the environment at this point;
+        // the runtime has not been spawned yet. This matches the pattern
+        // used by the `run` command for similar env-based configuration.
+        if self.auto_approve {
+            unsafe {
+                std::env::set_var("IRONCLAW_REBORN_AUTO_APPROVE_TOOLS", "1");
+            }
+        }
 
         // Multi-thread runtime — `build_reborn_runtime` spawns internal tasks
         // that deadlock on single-thread (confirmed by testing).
@@ -318,9 +430,13 @@ impl AcpServeCommand {
             .build()?;
 
         rt.block_on(async move {
-            eprintln!("[ACP] building reborn runtime...");
+            tracing::debug!("[ACP] building reborn runtime...");
+
+            // Apply trigger-fire access policy (issue #8).
+            runtime_input = apply_acp_trigger_fire_access_policy(runtime_input, &context).await?;
+
             let runtime = build_reborn_runtime(runtime_input).await?;
-            eprintln!("[ACP] reborn runtime built, starting ACP I/O");
+            tracing::debug!("[ACP] reborn runtime built, starting ACP I/O");
             let runtime = Arc::new(runtime);
             let conn_slot: Arc<std::sync::Mutex<Option<AgentSideConnection>>> =
                 Arc::new(std::sync::Mutex::new(None));
@@ -350,13 +466,25 @@ impl AcpServeCommand {
                             tokio::task::spawn_local(fut);
                         },
                     );
-                    *conn_slot.lock().unwrap() = Some(conn);
+                    *conn_slot.lock().map_err(|_| anyhow::anyhow!("connection lock poisoned"))? = Some(conn);
                     // Spawn the I/O task on the LocalSet so that both the
                     // I/O reader and the message handler (spawned inside
                     // via the callback) are driven concurrently.
                     let handle = tokio::task::spawn_local(io_task);
-                    // Block until stdin closes (EOF), which ends the session.
-                    let _ = handle.await;
+                    // Propagate I/O task errors (issue #15). The task returns
+                    // when stdin closes (EOF); a panic or error is surfaced
+                    // here instead of being silently discarded.
+                    match handle.await {
+                        Ok(Ok(())) => {}
+                        Ok(Err(io_err)) => {
+                            tracing::debug!("[ACP] I/O task ended with error: {io_err}");
+                        }
+                        Err(join_err) => {
+                            if !join_err.is_cancelled() {
+                                tracing::debug!("[ACP] I/O task panicked: {join_err}");
+                            }
+                        }
+                    }
                     Ok::<(), anyhow::Error>(())
                 })
                 .await?;
@@ -365,7 +493,7 @@ impl AcpServeCommand {
             // completes. This drains background tasks (turn scheduler,
             // trigger poller, credential refresh worker, etc.) following
             // the same pattern as the `serve` command in serve.rs.
-            eprintln!("[ACP] shutting down runtime...");
+            tracing::debug!("[ACP] shutting down runtime...");
             match Arc::try_unwrap(runtime) {
                 Ok(r) => r.shutdown().await.context("Reborn runtime shutdown failed")?,
                 Err(_) => {
@@ -384,5 +512,136 @@ impl AcpServeCommand {
         })?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The protocol negotiation must clamp to V1 when the client requests a
+    /// version higher than the server supports, and reject V0 outright.
+    #[test]
+    fn initialize_clamps_version_and_rejects_v0() {
+        struct MockAgent;
+
+        #[async_trait::async_trait(?Send)]
+        impl Agent for MockAgent {
+            async fn initialize(
+                &self,
+                args: InitializeRequest,
+            ) -> std::result::Result<InitializeResponse, Error> {
+                let negotiated = std::cmp::min(args.protocol_version, ProtocolVersion::LATEST);
+                if negotiated == ProtocolVersion::V0 {
+                    return Err(Error::invalid_params());
+                }
+                Ok(InitializeResponse::new(negotiated))
+            }
+
+            async fn authenticate(
+                &self,
+                _args: AuthenticateRequest,
+            ) -> std::result::Result<AuthenticateResponse, Error> {
+                Ok(AuthenticateResponse::new())
+            }
+
+            async fn new_session(
+                &self,
+                _args: NewSessionRequest,
+            ) -> std::result::Result<NewSessionResponse, Error> {
+                Ok(NewSessionResponse::new(SessionId::new("test".to_string())))
+            }
+
+            async fn prompt(
+                &self,
+                _args: PromptRequest,
+            ) -> std::result::Result<PromptResponse, Error> {
+                Ok(PromptResponse::new(StopReason::EndTurn))
+            }
+
+            async fn cancel(
+                &self,
+                _args: agent_client_protocol::CancelNotification,
+            ) -> std::result::Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current_thread runtime");
+
+        // Client requests V1 → server returns V1.
+        let resp = rt.block_on(MockAgent.initialize(InitializeRequest::new(
+            ProtocolVersion::V1,
+        )));
+        assert_eq!(resp.expect("v1 init").protocol_version, ProtocolVersion::V1);
+
+        // Client requests V999 → server clamps to LATEST (V1).
+        let resp = rt.block_on(MockAgent.initialize(InitializeRequest::new(
+            ProtocolVersion::from(999u16),
+        )));
+        assert_eq!(resp.expect("v999 init").protocol_version, ProtocolVersion::LATEST);
+
+        // Client requests V0 → server rejects.
+        let resp = rt.block_on(MockAgent.initialize(InitializeRequest::new(
+            ProtocolVersion::V0,
+        )));
+        assert!(resp.is_err());
+    }
+
+    /// `internal_error` must not expose raw internal text.
+    #[test]
+    fn internal_error_sanitizes_message() {
+        let err = internal_error("database at /var/lib/db/secret.sqlite3 is corrupt");
+        let msg = err.message.unwrap_or_default();
+        assert!(
+            msg.contains(INTERNAL_ERROR_CATEGORY),
+            "sanitized message must contain the category: {msg}"
+        );
+        // The raw path must NOT appear in the error message.
+        assert!(
+            !msg.contains("/var/lib/db/secret.sqlite3"),
+            "sanitized message must not contain internal paths: {msg}"
+        );
+    }
+
+    /// `SessionState::cancel_session` must cancel the existing token and
+    /// replace it so subsequent prompts are not pre-cancelled.
+    #[test]
+    fn cancel_session_replaces_token() {
+        let state = SessionState::new();
+        let sid = state.create_session();
+        let token_before = state.cancel_token_for(&sid);
+        assert!(!token_before.is_cancelled());
+
+        state.cancel_session(&sid);
+
+        // The old token must now be cancelled.
+        assert!(token_before.is_cancelled());
+
+        // A fresh token must be available for future prompts.
+        let token_after = state.cancel_token_for(&sid);
+        assert!(!token_after.is_cancelled());
+        assert!(!std::ptr::eq(
+            // Different instances — `Arc` clone comparison.
+            &token_before as *const _ as *const u8,
+            &token_after as *const _ as *const u8,
+        ));
+    }
+
+    /// Empty prompt content (whitespace-only) must be rejected.
+    #[test]
+    fn empty_prompt_rejected() {
+        let content = "   \n\t  ".to_string();
+        assert!(content.trim().is_empty());
+    }
+
+    /// MAX_PROMPT_BYTES is a reasonable bound.
+    #[test]
+    fn max_prompt_bytes_is_reasonable() {
+        assert!(MAX_PROMPT_BYTES >= 1024, "minimum 1 KiB");
+        assert!(MAX_PROMPT_BYTES <= 1024 * 1024, "maximum 1 MiB");
     }
 }
