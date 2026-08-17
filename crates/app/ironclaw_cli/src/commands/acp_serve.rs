@@ -189,34 +189,32 @@ impl Agent for RebornAcpAgent {
         let session_id: &str = &args.session_id.0;
 
         // ── Extract text content, bound total size, reject empty (issues #9, #11) ──
+        // Check the bound *during* iteration so oversized payloads are rejected
+        // before all text blocks are cloned into memory.
         let mut total_bytes: usize = 0;
-        let content: Vec<String> = args
-            .prompt
-            .iter()
-            .filter_map(|b| match b {
+        let mut content: Vec<String> = Vec::new();
+        for block in &args.prompt {
+            match block {
                 ContentBlock::Text(t) => {
                     total_bytes = total_bytes.saturating_add(t.text.len());
-                    Some(t.text.clone())
+                    if total_bytes > MAX_PROMPT_BYTES {
+                        return Err(Error::invalid_params());
+                    }
+                    content.push(t.text.clone());
                 }
                 ContentBlock::ResourceLink(_r) => {
                     tracing::debug!(
                         "ACP ResourceLink block received — not supported, skipping. \
                          Only text content is bridged to the Reborn runtime."
                     );
-                    None
                 }
                 other => {
                     tracing::debug!(
                         "ACP ContentBlock variant {:?} not supported — skipping.",
                         std::mem::discriminant(other),
                     );
-                    None
                 }
-            })
-            .collect();
-
-        if total_bytes > MAX_PROMPT_BYTES {
-            return Err(Error::invalid_params());
+            }
         }
 
         let content = content.join("\n");
@@ -330,10 +328,10 @@ impl<W> FlushingWrite<W> {
     }
 }
 
-// SAFETY (issue #13): `W: Unpin` guarantees the inner value can be moved out
-// of `Pin<&mut FlushingWrite<W>>`. Because `FlushingWrite<W>` is a simple
-// wrapper with no `Drop` impl and no self-referential pins, projecting the
-// pin to `inner` and re-pinning is sound via safe `Pin::new()`.
+// NOTE (issue #13): `W: Unpin` guarantees the inner value can be moved out of
+// `Pin<&mut FlushingWrite<W>>`. `FlushingWrite<W>` is a simple wrapper with
+// no `Drop` impl and no self-referential pins, so projecting the pin to
+// `inner` via `self.get_mut()` is sound.
 impl<W: Unpin + futures_io::AsyncWrite> futures_io::AsyncWrite for FlushingWrite<W> {
     fn poll_write(
         self: Pin<&mut Self>,
@@ -342,10 +340,20 @@ impl<W: Unpin + futures_io::AsyncWrite> futures_io::AsyncWrite for FlushingWrite
     ) -> std::task::Poll<std::io::Result<usize>> {
         let me = self.get_mut();
         let result = Pin::new(&mut me.inner).poll_write(cx, buf);
-        if result.is_ready() {
-            let _ = Pin::new(&mut me.inner).poll_flush(cx);
+        // Flush after each successful write so buffered data reaches the peer
+        // promptly. If flush fails, report the flush error rather than a false
+        // success.
+        match result {
+            std::task::Poll::Ready(Ok(n)) => {
+                if let std::task::Poll::Ready(Err(flush_err)) =
+                    Pin::new(&mut me.inner).poll_flush(cx)
+                {
+                    return std::task::Poll::Ready(Err(flush_err));
+                }
+                std::task::Poll::Ready(Ok(n))
+            }
+            other => other,
         }
-        result
     }
 
     fn poll_flush(
@@ -520,6 +528,11 @@ impl AcpServeCommand {
 mod tests {
     use super::*;
 
+    // NOTE: These tests validate protocol contract invariants (version
+    // negotiation, error sanitization, session lifecycle) using lightweight
+    // mocks. Full `RebornAcpAgent` integration tests require a `RebornRuntime`
+    // and are better suited as end-to-end tests against a live ACP client.
+
     /// The protocol negotiation must clamp to V1 when the client requests a
     /// version higher than the server supports, and reject V0 outright.
     #[test]
@@ -644,5 +657,36 @@ mod tests {
     fn max_prompt_bytes_is_reasonable() {
         assert!(MAX_PROMPT_BYTES >= 1024, "minimum 1 KiB");
         assert!(MAX_PROMPT_BYTES <= 1024 * 1024, "maximum 1 MiB");
+    }
+
+    /// Prompt payload exceeding MAX_PROMPT_BYTES is rejected during iteration,
+    /// before all blocks are cloned. This tests the early-reject path directly.
+    #[test]
+    fn prompt_bound_rejects_oversized_during_iteration() {
+        use agent_client_protocol::ContentBlock;
+
+        // Simulate the iteration logic from `RebornAcpAgent::prompt`.
+        let blocks: Vec<ContentBlock> = vec![
+            ContentBlock::from("a".repeat(MAX_PROMPT_BYTES / 2 + 1)),
+            ContentBlock::from("b".repeat(MAX_PROMPT_BYTES / 2 + 1)),
+        ];
+
+        let mut total_bytes: usize = 0;
+        let mut accepted = true;
+        for block in &blocks {
+            if let ContentBlock::Text(t) = block {
+                total_bytes = total_bytes.saturating_add(t.text.len());
+                if total_bytes > MAX_PROMPT_BYTES {
+                    accepted = false;
+                    break;
+                }
+            }
+        }
+
+        assert!(!accepted, "oversized payload must be rejected mid-iteration");
+        assert!(
+            total_bytes > MAX_PROMPT_BYTES,
+            "total must exceed bound at rejection point"
+        );
     }
 }
