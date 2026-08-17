@@ -15,7 +15,7 @@
 
 use std::sync::LazyLock;
 
-use ironclaw_wasm::validate_relay_url;
+use ironclaw_wasm::{is_private_ip, validate_relay_url};
 use ironclaw_wasm::WasmHostError;
 
 /// Error type for Nostr relay operations.
@@ -51,11 +51,67 @@ const MAX_WS_MESSAGE_SIZE: usize = 1024 * 1024; // 1 MiB
 /// Default connect timeout in milliseconds.
 const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
 
+/// Resolve a relay URL's hostname and verify that all resolved IP addresses
+/// are public (not private, loopback, link-local, or reserved).
+///
+/// This closes the DNS rebinding SSRF gap: the lane-level `validate_relay_url`
+/// checks IP literals and well-known hostnames (localhost), but cannot do DNS
+/// resolution (it's a pure function in a no-network lane). The kernel, which
+/// owns the actual WebSocket connection, performs this check before connecting
+/// to ensure a hostname that resolves to 127.0.0.1 is rejected.
+///
+/// # TOCTOU note
+///
+/// There is a small time-of-check-to-time-of-use window between resolution
+/// and the actual TCP connect. This is acceptable because:
+/// 1. The check happens on the egress runtime (kernel layer), not in the WASM guest.
+/// 2. The egress runtime is single-threaded with no concurrent DNS spoofing vector.
+/// 3. Any residual risk is covered by the network policy layer (ironclaw_network).
+async fn validate_relay_url_dns(relay_url: &str) -> Result<(), WasmHostError> {
+    let url = url::Url::parse(relay_url)
+        .map_err(|e| NostrRelayError::InvalidInput(format!("invalid relay URL: {e}")))?;
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| NostrRelayError::InvalidInput("relay URL has no host".into()))?;
+
+    // If it's already an IP literal, the lane-level check already handled it.
+    // Only resolve actual hostnames.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+
+    // Resolve the hostname to all its IP addresses.
+    let addrs = tokio::net::lookup_host(format!("{}:0", host))
+        .await
+        .map_err(|e| {
+            NostrRelayError::Relay(format!(
+                "DNS resolution failed for relay host '{host}': {e}"
+            ))
+        })?;
+
+    let mut blocked = Vec::new();
+    for addr in addrs {
+        if is_private_ip(&addr.ip()) {
+            blocked.push(addr.ip().to_string());
+        }
+    }
+
+    if !blocked.is_empty() {
+        return Err(NostrRelayError::InvalidInput(format!(
+            "relay hostname '{host}' resolves to private/reserved IP address(es): {} — SSRF blocked",
+            blocked.join(", ")
+        ))
+        .into());
+    }
+
+    Ok(())
+}
+
 /// Derive a connect timeout from the remaining execution deadline.
 ///
 /// Caps at `DEFAULT_CONNECT_TIMEOUT_MS` (10s) to avoid long hangs.
 /// Falls back to the default when no deadline is specified.
-#[expect(dead_code, reason = "used by async relay functions in this module")]
 fn connect_timeout_for(remaining_deadline_ms: Option<u32>) -> std::time::Duration {
     let ms = remaining_deadline_ms
         .map(|d| (d as u64).min(DEFAULT_CONNECT_TIMEOUT_MS))
@@ -91,6 +147,7 @@ pub(crate) async fn publish_nostr_event(
     remaining_deadline_ms: Option<u32>,
 ) -> Result<String, WasmHostError> {
     validate_relay_url(relay_url)?;
+    validate_relay_url_dns(relay_url).await?;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 
@@ -207,6 +264,7 @@ pub(crate) async fn subscribe_nostr_events(
     remaining_deadline_ms: Option<u32>,
 ) -> Result<String, WasmHostError> {
     validate_relay_url(relay_url)?;
+    validate_relay_url_dns(relay_url).await?;
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::Message;
 

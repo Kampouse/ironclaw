@@ -109,7 +109,7 @@ fn is_private_or_loopback_host(host: &str) -> bool {
 }
 
 /// Check whether an IP address is private, loopback, link-local, or reserved.
-fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {
     match ip {
         std::net::IpAddr::V4(v4) => {
             let octets = v4.octets();

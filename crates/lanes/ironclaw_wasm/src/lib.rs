@@ -27,7 +27,7 @@ pub use host::{
     WasmRuntimePolicyDiscarder, WasmRuntimeNostrAdapter, WasmStagedRuntimeCredential, WasmStagedRuntimeCredentialScope,
     WasmStagedRuntimeCredentials, WitToolHost,
 };
-pub use nostr_relay::{validate_relay_url, NostrRelayError};
+pub use nostr_relay::{is_private_ip, validate_relay_url, NostrRelayError};
 pub use nostr_signer::{decode_nostr_private_key, sign_nostr_event, NostrSignError};
 pub use runtime::WitToolRuntime;
 pub use types::{PreparedWitTool, WasmLogLevel, WasmLogRecord, WitToolExecution, WitToolRequest};
