@@ -1,0 +1,30 @@
+schema_version = "reborn.extension_manifest.v3"
+id = "buzz"
+name = "Buzz"
+version = "0.1.0"
+description = "Buzz messaging tool — send messages and subscribe to channels via Nostr relay"
+trust = "third_party"
+
+[runtime]
+kind = "wasm"
+module = "wasm/buzz_tool.component.wasm"
+
+[[tools]]
+id = "buzz.send_message"
+description = "Send a message to a Buzz channel via Nostr relay"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/buzz.input.v1.json"
+prompt_doc_ref = "prompts/buzz.description.v1.md"
+
+[[tools]]
+id = "buzz.subscribe_channel"
+description = "Subscribe to events in a Buzz channel via Nostr relay"
+effects = ["network"]
+default_permission = "ask"
+visibility = "model"
+origin_gate_matrix = { loop_run = "gated_unless_granted", product = "forbidden", automation = "forbidden" }
+input_schema_ref = "schemas/buzz.input.v1.json"
+prompt_doc_ref = "prompts/buzz.description.v1.md"

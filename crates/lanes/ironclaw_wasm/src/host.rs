@@ -710,10 +710,6 @@ impl WasmHostNostr for DenyWasmHostNostr {
 /// constructs one of these per `host_for_scope` call, binding a `ResourceScope`
 /// and `CapabilityId` to the underlying Nostr host. Every delegation call logs the
 /// scope and capability for audit trail.
-///
-/// This ensures that even if the same `WasmHostNostr` instance is shared across
-/// capabilities, each invocation can be attributed to a specific scope/capability
-/// in logs and metrics.
 pub struct WasmRuntimeNostrAdapter<N> {
     inner: N,
     scope: ResourceScope,
@@ -765,11 +761,10 @@ impl<N: WasmHostNostr> WasmHostNostr for WasmRuntimeNostrAdapter<N> {
         tracing::debug!(
             scope = ?self.scope,
             capability_id = %self.capability_id,
-            relay_url = relay_url,
+            relay = relay_url,
             "nostr: publish_event (scoped adapter)"
         );
-        self.inner
-            .publish_event(relay_url, signed_event_json, remaining_deadline_ms)
+        self.inner.publish_event(relay_url, signed_event_json, remaining_deadline_ms)
     }
 
     fn subscribe_events(
@@ -782,8 +777,7 @@ impl<N: WasmHostNostr> WasmHostNostr for WasmRuntimeNostrAdapter<N> {
         tracing::debug!(
             scope = ?self.scope,
             capability_id = %self.capability_id,
-            relay_url = relay_url,
-            timeout_ms = timeout_ms,
+            relay = relay_url,
             "nostr: subscribe_events (scoped adapter)"
         );
         self.inner
@@ -791,10 +785,9 @@ impl<N: WasmHostNostr> WasmHostNostr for WasmRuntimeNostrAdapter<N> {
     }
 }
 
-// Allow `Arc<dyn WasmHostNostr>` to be used as the inner type of
-// `WasmRuntimeNostrAdapter`. This is needed because `host_for_scope` stores
-// the Nostr host as `Option<Arc<dyn WasmHostNostr>>` and passes `Arc::clone`
-// to the adapter.
+// Allow `Arc<dyn WasmHostNostr>` to be used wherever `WasmHostNostr` is expected.
+// This lets the host_runtime wrap its stored `Arc<dyn WasmHostNostr>` in
+// `WasmRuntimeNostrAdapter` without an extra indirection.
 impl WasmHostNostr for Arc<dyn WasmHostNostr> {
     fn sign_event(&self, unsigned_event_json: &str) -> Result<String, WasmHostError> {
         (**self).sign_event(unsigned_event_json)
@@ -816,7 +809,8 @@ impl WasmHostNostr for Arc<dyn WasmHostNostr> {
         timeout_ms: u32,
         remaining_deadline_ms: Option<u32>,
     ) -> Result<String, WasmHostError> {
-        (**self).subscribe_events(relay_url, filter_json, timeout_ms, remaining_deadline_ms)
+        (**self)
+            .subscribe_events(relay_url, filter_json, timeout_ms, remaining_deadline_ms)
     }
 }
 

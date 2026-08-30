@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::runtime_adapters::KernelNostrHost;
 use super::LibSqlRootFilesystem;
 use super::PostgresRootFilesystem;
 use super::{
@@ -13,8 +14,8 @@ use super::{
     RebornEventStoreError, RebornEventStores, RebornProfile, ResourceGovernor, RootFilesystem,
     RunProfileResolver, RuntimeBackendHealth, RuntimeCredentialAccountResolver, RuntimeHttpEgress,
     RuntimeKind, RuntimeProcessPort, ScopedFilesystem, ScriptExecutor, SecretMode, SecretStorePort,
-    SecurityAuditSink, SharedSecretStore, TenantSandboxProcessPort, TrustPolicy,
-    TurnRunWakeNotifier, WasmError, WasmHostNostr, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
+    SecurityAuditSink, SharedSecretStore, TrustPolicy,
+    TurnRunWakeNotifier, UserSandboxProcessPort, WasmError, WasmHostNostr, WasmRuntimeAdapter, WasmRuntimeCredentialProvider,
     WasmStagedRuntimeCredentials, WitToolHost, WitToolRuntimeConfig, build_reborn_event_stores,
     production_wiring_report, set_runtime_http_egress, set_tool_call_http_egress,
 };
@@ -60,7 +61,7 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
             wasm_credential_provider,
             nostr_host,
             runtime_health,
@@ -105,7 +106,7 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
             wasm_credential_provider,
             nostr_host,
             runtime_health,
@@ -169,7 +170,7 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
             wasm_credential_provider,
             nostr_host,
             runtime_health,
@@ -216,7 +217,7 @@ where
             tool_call_http_egress,
             process_port,
             managed_process_port,
-            tenant_sandbox_process_port,
+            user_sandbox_process_port,
             wasm_credential_provider,
             nostr_host,
             runtime_health,
@@ -629,27 +630,27 @@ where
         self
     }
 
-    pub fn with_tenant_sandbox_process_port(
+    pub fn with_user_sandbox_process_port(
         mut self,
-        process_port: Arc<TenantSandboxProcessPort>,
+        process_port: Arc<UserSandboxProcessPort>,
     ) -> Self {
-        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
-            "TenantSandboxProcessPort",
+        self.component_types.user_sandbox_process_port = Some(ProductionComponentType::named(
+            "UserSandboxProcessPort",
             ProductionImplementationReadiness::UnverifiedProductionImplementation,
         ));
-        self.tenant_sandbox_process_port = Some(process_port);
+        self.user_sandbox_process_port = Some(process_port);
         self
     }
 
-    pub fn with_production_tenant_sandbox_process_port(
+    pub fn with_production_user_sandbox_process_port(
         mut self,
-        process_port: Arc<TenantSandboxProcessPort>,
+        process_port: Arc<UserSandboxProcessPort>,
     ) -> Self {
-        self.component_types.tenant_sandbox_process_port = Some(ProductionComponentType::named(
-            "TenantSandboxProcessPort",
+        self.component_types.user_sandbox_process_port = Some(ProductionComponentType::named(
+            "UserSandboxProcessPort",
             ProductionImplementationReadiness::ProductionCandidate,
         ));
-        self.tenant_sandbox_process_port = Some(process_port);
+        self.user_sandbox_process_port = Some(process_port);
         self
     }
 
@@ -901,5 +902,18 @@ where
 
     pub fn try_with_default_wasm_runtime(self) -> Result<Self, WasmError> {
         self.try_with_wasm_runtime(WitToolRuntimeConfig::default(), WitToolHost::deny_all())
+    }
+
+    /// Like [`Self::try_with_default_wasm_runtime`] but enables Nostr host
+    /// functions (sign, publish, subscribe) using the provided private key
+    /// (hex or nsec bech32).
+    pub fn try_with_default_wasm_runtime_with_nostr(
+        self,
+        nostr_private_key: &str,
+    ) -> Result<Self, WasmError> {
+        let nostr_host = KernelNostrHost::new(nostr_private_key)
+            .map_err(|e| WasmError::CompilationFailed(format!("invalid nostr key: {e}")))?;
+        let host = WitToolHost::deny_all().with_nostr(std::sync::Arc::new(nostr_host));
+        self.try_with_wasm_runtime(WitToolRuntimeConfig::default(), host)
     }
 }

@@ -40,7 +40,11 @@ test-support = [
     "ironclaw_webui/test-support",
 ]
 [dependencies]
+# ACP (Agent Client Protocol) stdio transport for IDE/CLI agent integration.
+agent-client-protocol = "0.10"
 anyhow = "1"
+# Needed for ACP stdio compat (futures-io AsyncWrite trait).
+futures-io = "0.3"
 async-trait = { version = "0.1" }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4.3"
@@ -71,6 +75,8 @@ ironclaw_extension_support = { path = "../../extensions/ironclaw_extension_suppo
 ironclaw_auth = { path = "../../domains/ironclaw_auth", version = "0.1.0" }
 ironclaw_slack_extension = { path = "../../extensions/packages/slack", version = "0.1.0" }
 ironclaw_telegram_extension = { path = "../../extensions/packages/telegram", version = "0.1.0" }
+ironclaw_web_push = { path = "../../domains/ironclaw_web_push", version = "0.1.0" }
+ironclaw_web_push_extension = { path = "../../extensions/packages/web-push", version = "0.1.0" }
 ironclaw_webui = { path = "../../product/ironclaw_webui", version = "0.1.0" }
 rand = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream"] }
@@ -81,7 +87,7 @@ sha2 = "0.11"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "io-util", "io-std", "sync", "time"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["rt", "compat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4", "v5", "serde"] }

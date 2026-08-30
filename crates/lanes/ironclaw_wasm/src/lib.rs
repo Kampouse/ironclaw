@@ -20,9 +20,9 @@ pub use config::{TOOL_WIT, WIT_TOOL_VERSION, WitToolRuntimeConfig};
 pub use error::{WasmError, WasmHostError};
 pub use host::{
     DenyWasmHostHttp, DenyWasmHostNostr, DenyWasmHostSecrets, DenyWasmHostTools,
-    DenyWasmHostWorkspace, EmptyWasmRuntimeCredentials, RecordingWasmHostHttp,
-    SystemWasmHostClock, WasmHostClock, WasmHostHttp, WasmHostNostr, WasmHostSecrets,
-    WasmHostTools, WasmHostWorkspace, WasmHttpRequest, WasmHttpResponse,
+    DenyWasmHostWorkspace, EmptyWasmRuntimeCredentials,
+    RecordingWasmHostHttp, SystemWasmHostClock, WasmHostClock, WasmHostHttp, WasmHostNostr,
+    WasmHostSecrets, WasmHostTools, WasmHostWorkspace, WasmHttpRequest, WasmHttpResponse,
     WasmRuntimeCredentialProvider, WasmRuntimeCredentialRequest, WasmRuntimeHttpAdapter,
     WasmRuntimePolicyDiscarder, WasmRuntimeNostrAdapter, WasmStagedRuntimeCredential, WasmStagedRuntimeCredentialScope,
     WasmStagedRuntimeCredentials, WitToolHost,

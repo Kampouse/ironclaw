@@ -1,3 +1,4 @@
+use secrecy::ExposeSecret;
 use super::*;
 
 /// The ONE construction seam for host HTTP egress.
@@ -158,8 +159,9 @@ where
 {
     match binding {
         RebornRuntimeProcessBinding::None => services,
-        RebornRuntimeProcessBinding::TenantSandbox { process_port } => {
-            services.with_production_tenant_sandbox_process_port(process_port)
+        RebornRuntimeProcessBinding::UserSandbox { process_port } => {
+            services.with_production_user_sandbox_process_port(process_port)
         }
     }
 }
+

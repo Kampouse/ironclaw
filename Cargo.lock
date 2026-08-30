@@ -73,6 +73,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "agent-client-protocol"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10eeef5e80864f9c3c148a3f395c3e35a66d37ec7561c7845b2bffae8e841759"
+dependencies = [
+ "agent-client-protocol-schema",
+ "anyhow",
+ "async-broadcast",
+ "async-trait",
+ "derive_more",
+ "futures",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "agent-client-protocol-schema"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca68e7e55681ce56546c0cecc6bc8f20493d24b44c6d93ec46174f310730bba2"
+dependencies = [
+ "anyhow",
+ "derive_more",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "strum",
+]
+
+[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2168,6 +2199,7 @@ dependencies = [
  "quote",
  "rustc_version",
  "syn 2.0.119",
+ "unicode-xid",
 ]
 
 [[package]]
@@ -3463,6 +3495,7 @@ checksum = "d98f6fed1fde3f8c21bc40a1abb88dd75e67924f9cffc3ef95607bad8017f8e2"
 name = "ironclaw"
 version = "1.1.0-rc.1"
 dependencies = [
+ "agent-client-protocol",
  "anyhow",
  "async-trait",
  "chrono",
@@ -3470,6 +3503,7 @@ dependencies = [
  "clap_complete",
  "crossterm",
  "dotenvy",
+ "futures-io",
  "hex",
  "ironclaw_auth",
  "ironclaw_common",
@@ -3487,6 +3521,8 @@ dependencies = [
  "ironclaw_slack_extension",
  "ironclaw_telegram_extension",
  "ironclaw_trace_commons",
+ "ironclaw_web_push",
+ "ironclaw_web_push_extension",
  "ironclaw_webui",
  "libc",
  "rand 0.10.2",
@@ -3550,6 +3586,7 @@ name = "ironclaw_architecture_tests"
 version = "0.1.0"
 dependencies = [
  "ironclaw_host_api",
+ "ironclaw_product_contracts",
  "proc-macro2",
  "serde_json",
  "syn 3.0.3",
@@ -3599,6 +3636,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turn_runner",
  "ironclaw_turns",
+ "ironclaw_web_push",
  "libsql",
  "secrecy",
  "serde",
@@ -3788,6 +3826,7 @@ dependencies = [
  "ironclaw_resources",
  "ironclaw_runtime_policy",
  "ironclaw_safety",
+ "ironclaw_sandbox",
  "ironclaw_secrets",
  "ironclaw_skills",
  "ironclaw_slack_extension",
@@ -3797,6 +3836,7 @@ dependencies = [
  "ironclaw_trust",
  "ironclaw_turn_runner",
  "ironclaw_turns",
+ "ironclaw_web_push",
  "ironclaw_webui",
  "libc",
  "libsql",
@@ -4216,6 +4256,7 @@ name = "ironclaw_host_runtime"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "aws-lc-rs",
  "axum 0.8.9",
  "base64 0.23.0",
  "chrono",
@@ -4365,6 +4406,8 @@ dependencies = [
  "ironclaw_turn_runner",
  "ironclaw_turns",
  "ironclaw_wasm",
+ "ironclaw_web_push",
+ "ironclaw_web_push_extension",
  "ironclaw_webui",
  "libsql",
  "pretty_assertions",
@@ -5150,6 +5193,40 @@ version = "0.1.0"
 dependencies = [
  "tracing",
  "wasmtime",
+]
+
+[[package]]
+name = "ironclaw_web_push"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-lc-rs",
+ "base64 0.23.0",
+ "ironclaw_filesystem",
+ "ironclaw_host_api",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.19",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "ironclaw_web_push_extension"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "ironclaw_extension_contracts",
+ "ironclaw_host_api",
+ "ironclaw_outbound",
+ "ironclaw_web_push",
+ "serde_json",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
 ]
 
 [[package]]
@@ -8560,6 +8637,7 @@ checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
 dependencies = [
  "bytes",
  "futures-core",
+ "futures-io",
  "futures-sink",
  "futures-util",
  "libc",
